@@ -10,30 +10,62 @@ function firstString(...values) {
   return values.find((value) => typeof value === 'string' && value.length > 0) ?? null;
 }
 
+function consistentStringIdentity(values) {
+  const identities = [];
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue;
+    if (typeof value !== 'string') return null;
+    identities.push(value);
+  }
+  return identities.length === 0 || new Set(identities).size === 1
+    ? firstString(...identities)
+    : null;
+}
+
 function eventParams(event) {
   return isRecord(event?.params) ? event.params : {};
 }
 
 function extractThreadId(event) {
   const params = eventParams(event);
-  return firstString(
+  return consistentStringIdentity([
     event?.threadId,
     event?.thread?.id,
+    event?.turn?.threadId,
+    event?.turn?.thread_id,
     params.threadId,
     params.thread?.id,
     params.turn?.threadId,
+    params.turn?.thread_id,
     params.item?.threadId,
-  );
+    params.item?.thread?.id,
+  ]);
 }
 
 function extractTurnId(event) {
   const params = eventParams(event);
-  return firstString(
+  const turn = currentTurnRecord(event);
+  return consistentStringIdentity([
     event?.turnId,
     event?.internalTurnId,
+    event?.turn?.id,
+    event?.turn?.turnId,
+    event?.turn?.internalTurnId,
+    event?.turnRecord?.id,
+    event?.turnRecord?.turnId,
+    event?.currentTurn?.id,
+    event?.currentTurn?.turnId,
     params.turnId,
+    params.turn?.id,
+    params.turn?.turnId,
+    params.turn?.internalTurnId,
     params.item?.turnId,
-  );
+    params.item?.turn?.id,
+    params.diff?.turnId,
+    params.diff?.turn?.id,
+    turn?.id,
+    turn?.turnId,
+  ]);
 }
 
 function currentTurnRecord(event) {
@@ -254,6 +286,7 @@ function assistantText(event, type) {
 export function normalizeEvent(event) {
   const type = eventType(event);
   const threadId = extractThreadId(event);
+  const internalTurnId = extractTurnId(event);
   const publicType = type === 'supervisor.process.failed' && !threadId
     ? 'supervisor.process.notice'
     : type;
@@ -274,6 +307,18 @@ export function normalizeEvent(event) {
     normalized.error = type === 'supervisor.process.failed'
       ? { code: 'app_server_crash', message: 'Codex app-server process failed.' }
       : safeError(error);
+  }
+  if (internalTurnId) {
+    Object.defineProperties(normalized, {
+      internalTurnId: {
+        value: internalTurnId,
+        enumerable: false,
+      },
+      verifiedTurnIdentity: {
+        value: true,
+        enumerable: false,
+      },
+    });
   }
   return normalized;
 }

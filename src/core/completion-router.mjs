@@ -22,24 +22,70 @@ function eventType(event) {
   return typeof event.type === 'string' ? event.type.replaceAll('/', '.').toLowerCase() : '';
 }
 
-function trustedCanonical(event, suppliedResult) {
-  return suppliedResult instanceof TerminalResult
-    && (event.provenance === 'canonical' || event.provenance === 'recovery');
+function hasVerifiedTerminalMarker(event) {
+  return event.verified === true || event.verifiedTerminal === true;
 }
 
-function terminalStatus(event, suppliedPayload, suppliedResult) {
-  const verifiedTypeStatus = VERIFIED_TERMINAL_TYPES.get(eventType(event));
-  const eventStatus = normalizeTerminalStatus(event.status ?? event.reason);
-  const resultStatus = normalizeTerminalStatus(suppliedPayload?.status);
+function trustedCanonical(event, suppliedResult) {
+  return event.provenance === 'canonical'
+    && hasVerifiedTerminalMarker(event)
+    && VERIFIED_TERMINAL_TYPES.has(eventType(event))
+    && suppliedResult instanceof TerminalResult;
+}
 
-  if (verifiedTypeStatus) {
-    if (eventStatus && eventStatus !== verifiedTypeStatus) return null;
-    if (resultStatus && resultStatus !== verifiedTypeStatus) return null;
-    return verifiedTypeStatus;
+function trustedRecovery(event, suppliedResult) {
+  return eventType(event) === 'recovery.terminal'
+    && event.provenance === 'recovery'
+    && hasVerifiedTerminalMarker(event)
+    && suppliedResult instanceof TerminalResult;
+}
+
+function collectIdentityValues(values) {
+  const identities = [];
+  for (const value of values) {
+    if (value === undefined) continue;
+    if (typeof value !== 'string' || value.length === 0) return null;
+    identities.push(value);
   }
-  if (!trustedCanonical(event, suppliedResult) || !resultStatus) return null;
-  if (eventStatus && eventStatus !== resultStatus) return null;
-  return resultStatus;
+  return identities;
+}
+
+function consistentIdentity(values) {
+  return values !== null && new Set(values).size <= 1;
+}
+
+function collectStatusValues(values) {
+  const statuses = [];
+  for (const value of values) {
+    if (value === undefined) continue;
+    const status = normalizeTerminalStatus(value);
+    if (!status) return null;
+    statuses.push(status);
+  }
+  return statuses;
+}
+
+function statusMatches(statuses, expected) {
+  return statuses !== null && (statuses.length === 0 || statuses.every((status) => status === expected));
+}
+
+function terminalStatus(event, suppliedPayloads, suppliedResult) {
+  const verifiedTypeStatus = VERIFIED_TERMINAL_TYPES.get(eventType(event));
+  const payloadStatuses = suppliedPayloads.flatMap((payload) => [payload?.status, payload?.terminalStatus]);
+  const statuses = collectStatusValues([
+    event.status,
+    event.reason,
+    event.terminalStatus,
+    event.turn?.status,
+    event.turn?.reason,
+    ...payloadStatuses,
+  ]);
+  if (verifiedTypeStatus) {
+    return statusMatches(statuses, verifiedTypeStatus) ? verifiedTypeStatus : null;
+  }
+  if (!trustedRecovery(event, suppliedResult) || statuses === null || statuses.length === 0) return null;
+  const [resultStatus, ...otherStatuses] = statuses;
+  return otherStatuses.every((status) => status === resultStatus) ? resultStatus : null;
 }
 
 function storesFrom(options) {
@@ -79,28 +125,60 @@ export class CompletionRouter {
 
   onTerminal(event = {}) {
     if (!isRecord(event)) return null;
-    const suppliedResult = event.terminalResult ?? event.result ?? null;
-    const suppliedPayload = typeof suppliedResult?.toJSON === 'function'
-      ? suppliedResult.toJSON()
-      : isRecord(suppliedResult) ? suppliedResult : null;
-    const status = terminalStatus(event, suppliedPayload, suppliedResult);
+    const suppliedResults = [event.terminalResult, event.result].filter((result) => result !== undefined && result !== null);
+    const suppliedPayloads = suppliedResults.map((result) => (
+      typeof result?.toJSON === 'function' ? result.toJSON() : isRecord(result) ? result : null
+    ));
+    if (suppliedPayloads.some((payload) => payload === null)) return null;
+    const suppliedResult = suppliedResults[0] ?? null;
+    const suppliedPayload = suppliedPayloads[0] ?? null;
+    const status = terminalStatus(event, suppliedPayloads, suppliedResult);
     if (!status) return null;
-    const eventThreadId = firstString(event.threadId, event.thread?.id);
-    const resultThreadId = firstString(suppliedPayload?.threadId);
-    if (eventThreadId && resultThreadId && eventThreadId !== resultThreadId) return null;
-    const threadId = eventThreadId ?? resultThreadId;
+    if (suppliedResults.length > 0 && suppliedPayloads.some((payload) => !payload?.status)) return null;
+
+    const eventThreadIds = collectIdentityValues([
+      event.threadId,
+      event.thread?.id,
+      event.turn?.threadId,
+      event.turn?.thread_id,
+    ]);
+    const resultThreadIds = collectIdentityValues(suppliedPayloads.flatMap((payload) => [
+      payload?.threadId,
+      payload?.thread?.id,
+    ]));
+    if (!consistentIdentity(eventThreadIds)
+      || !consistentIdentity(resultThreadIds)
+      || !consistentIdentity([...eventThreadIds, ...resultThreadIds])) return null;
+    const threadIds = [...eventThreadIds, ...resultThreadIds];
+    const threadId = firstString(...threadIds);
     if (!threadId) return null;
 
     const knownExecution = this.executions?.getExecution(threadId) ?? null;
-    const eventTurnId = firstString(
+    if (event.verifiedTurnIdentity !== undefined && event.verifiedTurnIdentity !== true) return null;
+    const eventTurnIds = collectIdentityValues([
       event.turnId,
       event.internalTurnId,
       event.turn?.id,
       event.turn?.turnId,
-    );
-    if (knownExecution && eventTurnId && eventTurnId !== knownExecution.turnId) return null;
-    if (!knownExecution && !trustedCanonical(event, suppliedResult)) return null;
-    const turnId = eventTurnId ?? knownExecution?.turnId;
+      event.turn?.internalTurnId,
+    ]);
+    const resultTurnIds = collectIdentityValues(suppliedPayloads.flatMap((payload) => [
+      payload?.turnId,
+      payload?.internalTurnId,
+      payload?.turn?.id,
+      payload?.turn?.turnId,
+    ]));
+    if (!consistentIdentity(eventTurnIds) || !consistentIdentity(resultTurnIds)) return null;
+    const turnIds = [...eventTurnIds, ...resultTurnIds];
+    if (!consistentIdentity(turnIds)) return null;
+    const eventTurnId = firstString(...eventTurnIds);
+    const resultTurnId = firstString(...resultTurnIds);
+    if (knownExecution && (!eventTurnId || eventTurnId !== knownExecution.turnId)) return null;
+    if (knownExecution && event.workspace !== undefined && event.workspace !== knownExecution.workspace) return null;
+    if (!knownExecution
+      && !trustedCanonical(event, suppliedResult)
+      && !trustedRecovery(event, suppliedResult)) return null;
+    const turnId = eventTurnId ?? resultTurnId;
     if (!turnId) return null;
 
     const terminalResult = suppliedResult ?? TerminalResult.fromTerminal({

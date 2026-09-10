@@ -9,6 +9,7 @@ import { CompletionRouter } from '../../src/core/completion-router.mjs';
 import { CompletionStore } from '../../src/core/completion-store.mjs';
 import { ExecutionStore } from '../../src/core/execution-store.mjs';
 import { TerminalResult } from '../../src/core/terminal-result.mjs';
+import { normalizeEvent } from '../../src/adapters/supervisor/protocol-normalizer.mjs';
 
 async function setup(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'codex-as-subagent-router-'));
@@ -72,16 +73,21 @@ test('CompletionRouter accepts normalized terminal events and preserves their sa
     ownerInstanceId: 'router-instance',
   });
 
-  const result = router.onTerminal({
-    type: 'turn.completed',
+  const result = router.onTerminal(normalizeEvent({
+    method: 'turn/completed',
     threadId: 'thread-normalized',
-    assistantMessage: 'normalized complete',
-    changes: {
-      files: [{ path: 'normalized-turn.mjs', kind: 'modified' }],
-      filesChanged: 1,
-      filesTruncated: false,
+    turnId: 'turn-normalized',
+    params: {
+      turn: {
+        id: 'turn-normalized',
+        status: 'completed',
+        assistantMessage: 'normalized complete',
+        changes: {
+          files: [{ path: 'normalized-turn.mjs', kind: 'modified' }],
+        },
+      },
     },
-  });
+  }));
   assert.equal(result.deliveryState, 'pending');
   assert.deepEqual(result.payload.changes, {
     files: [{ path: 'normalized-turn.mjs', kind: 'modified' }],
@@ -90,7 +96,7 @@ test('CompletionRouter accepts normalized terminal events and preserves their sa
   });
 });
 
-test('CompletionRouter accepts an already-built canonical TerminalResult', async (t) => {
+test('CompletionRouter accepts an already-built verified recovery TerminalResult', async (t) => {
   const { store, completions, router } = await setup(t);
   const terminalResult = new TerminalResult({
     threadId: 'thread-canonical',
@@ -103,7 +109,10 @@ test('CompletionRouter accepts an already-built canonical TerminalResult', async
     },
   });
   const result = router.onTerminal({
-    provenance: 'canonical',
+    type: 'recovery.terminal',
+    provenance: 'recovery',
+    verifiedTerminal: true,
+    threadId: 'thread-canonical',
     turnId: 'turn-canonical',
     workspace: '/workspace/router-canonical',
     terminalResult,
@@ -155,6 +164,35 @@ test('CompletionRouter only accepts verified terminal types and matching identit
     threadId: 'orphan-thread',
     turnId: 'orphan-turn',
   }), null);
+  const canonicalResult = new TerminalResult({
+    threadId: 'thread-negative',
+    status: 'completed',
+    finalAssistantMessage: 'must not bypass event type',
+    changes: { files: [] },
+  });
+  assert.equal(router.onTerminal({
+    type: 'item.completed',
+    provenance: 'canonical',
+    verifiedTerminal: true,
+    threadId: 'thread-negative',
+    turnId: 'turn-negative',
+    terminalResult: canonicalResult,
+  }), null);
+  assert.equal(router.onTerminal({
+    type: 'recovery.terminal',
+    provenance: 'recovery',
+    threadId: 'thread-negative',
+    turnId: 'turn-negative',
+    terminalResult: canonicalResult,
+  }), null);
+  assert.equal(router.onTerminal({
+    type: 'item.completed',
+    provenance: 'recovery',
+    verifiedTerminal: true,
+    threadId: 'thread-negative',
+    turnId: 'turn-negative',
+    terminalResult: canonicalResult,
+  }), null);
   assert.equal(router.onTerminal({
     type: 'turn.completed',
     threadId: 'thread-negative',
@@ -199,16 +237,23 @@ test('CompletionRouter preserves truncated normalized change metadata', async (t
     ownerInstanceId: 'router-instance',
   });
   const files = Array.from({ length: 20 }, (_, index) => `turn-file-${index}.mjs`);
-  const result = router.onTerminal({
-    type: 'turn.completed',
+  const normalized = normalizeEvent({
+    method: 'turn/completed',
     threadId: 'thread-truncated',
-    assistantMessage: 'truncated safely',
-    changes: {
-      files,
-      filesChanged: 25,
-      filesTruncated: true,
+    turnId: 'turn-truncated',
+    turn: {
+      id: 'turn-truncated',
+      status: 'completed',
+      assistantMessage: 'truncated safely',
+      fileChanges: files.slice(0, 1),
     },
   });
+  normalized.changes = {
+    files,
+    filesChanged: 25,
+    filesTruncated: true,
+  };
+  const result = router.onTerminal(normalized);
   assert.equal(result.payload.changes.files.length, 20);
   assert.equal(result.payload.changes.filesChanged, 25);
   assert.equal(result.payload.changes.filesTruncated, true);

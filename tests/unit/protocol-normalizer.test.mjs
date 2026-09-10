@@ -44,7 +44,34 @@ test("normalizeEvent returns a bounded public projection without internal ids", 
     assistantMessage: "done",
     changes: { files: ["src/one.mjs"], filesChanged: 1, filesTruncated: false },
   });
+  assert.equal(event.internalTurnId, "turn-1");
+  assert.equal(event.verifiedTurnIdentity, true);
+  assert.equal(Object.keys(event).includes("internalTurnId"), false);
+  assert.equal(Object.keys(event).includes("verifiedTurnIdentity"), false);
   assert.doesNotMatch(JSON.stringify(event), /turnId|eventCursor|cursor|repositoryDiff/);
+  assert.deepEqual(publicProjection(event), {
+    type: "turn.completed",
+    threadId: "thread-1",
+    status: "completed",
+    assistantMessage: "done",
+    changes: { files: ["src/one.mjs"], filesChanged: 1, filesTruncated: false },
+  });
+});
+
+test("normalizeEvent rejects conflicting thread and turn identities", () => {
+  const conflict = normalizeEvent({
+    method: "turn/completed",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    params: {
+      threadId: "thread-2",
+      turn: { id: "turn-2", status: "completed" },
+    },
+  });
+
+  assert.equal(conflict.threadId, null);
+  assert.equal("internalTurnId" in conflict, false);
+  assert.equal("verifiedTurnIdentity" in conflict, false);
 });
 
 test("normalizeEvent supports vendor EventStore params.turn, params.item and params.diff", () => {
@@ -203,7 +230,7 @@ test("changed files come only from the current turn structured record", () => {
       threadId: "thread-1",
       turn: { id: "turn-1", changes: { files: ["missing-event-turn-id.mjs"] } },
     }),
-    { files: [], filesChanged: 0, filesTruncated: false },
+    { files: ["missing-event-turn-id.mjs"], filesChanged: 1, filesTruncated: false },
   );
   assert.deepEqual(
     extractTurnChanges({
