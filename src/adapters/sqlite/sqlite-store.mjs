@@ -62,13 +62,19 @@ function changedFiles(value) {
   return summarizeChangedFiles(value?.files);
 }
 
-function canonicalPayload(value, fallbackThreadId) {
+function canonicalPayload(value, fallbackThreadId, fallbackTurnId) {
   const source = typeof value?.toJSON === 'function' ? value.toJSON() : value;
   if (!isRecord(source)) {
     throw new TypeError('Terminal result payload must be an object.');
   }
 
-  const threadId = requiredString(source.threadId ?? fallbackThreadId, 'threadId');
+  if (source.threadId !== undefined && source.threadId !== fallbackThreadId) {
+    throw new TypeError('Terminal result threadId does not match the completion row.');
+  }
+  if (source.turnId !== undefined && source.turnId !== fallbackTurnId) {
+    throw new TypeError('Terminal result turnId does not match the completion row.');
+  }
+  const threadId = requiredString(fallbackThreadId ?? source.threadId, 'threadId');
   const status = normalizeTerminalStatus(source.status);
   if (!status) throw new TypeError('Terminal result status must be terminal.');
 
@@ -462,7 +468,11 @@ export class SqliteStore {
     const inputPayload = options.terminalResult ?? options.result ?? options.payload ?? options;
     const threadId = requiredString(options.threadId ?? inputPayload?.threadId, 'threadId');
     const turnId = requiredString(options.turnId ?? options.internalTurnId ?? inputPayload?.turnId, 'turnId');
-    const payload = canonicalPayload(inputPayload, threadId);
+    const payload = canonicalPayload(inputPayload, threadId, turnId);
+    const requestedStatus = options.status ?? options.terminalStatus;
+    if (requestedStatus !== undefined && normalizeTerminalStatus(requestedStatus) !== payload.status) {
+      throw new TypeError('Terminal result status does not match the completion row.');
+    }
     const completionId = requiredString(options.completionId ?? options.id ?? randomUUID(), 'completionId');
     const requestedWorkspace = options.workspace ?? payload.workspace;
     const createdAt = asTimestamp(options.createdAt ?? options.now);

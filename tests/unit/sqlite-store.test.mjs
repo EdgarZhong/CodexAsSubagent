@@ -3,10 +3,12 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
+import { Worker } from 'node:worker_threads';
 
 import { SqliteStore } from '../../src/adapters/sqlite/sqlite-store.mjs';
 import { CompletionStore } from '../../src/core/completion-store.mjs';
 import { ExecutionStore } from '../../src/core/execution-store.mjs';
+import { TerminalResult } from '../../src/core/terminal-result.mjs';
 
 async function openStore(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'codex-as-subagent-task3-'));
@@ -191,9 +193,40 @@ test('direct reservation uses compare-and-set, ACK is required, and expired leas
   assert.equal(completions.getCompletion('pending-direct-completion').deliveryState, 'claimed_direct');
   assert.equal(executions.releaseReservation({ reservationId: 'pending-direct-reservation' }).released, true);
   assert.equal(completions.getCompletion('pending-direct-completion').deliveryState, 'pending');
+
+  executions.createExecution({
+    threadId: 'thread-direct-lease',
+    turnId: 'turn-direct-lease',
+    workspace,
+    ownerInstanceId: 'instance-1',
+    now: '2026-09-11T00:00:00.000Z',
+  });
+  executions.reserveDirect({
+    threadId: 'thread-direct-lease',
+    reservationId: 'direct-lease-reservation',
+    now: '2026-09-11T00:00:00.000Z',
+  });
+  const directLease = completions.insertCompletionFirst(terminal(
+    'thread-direct-lease',
+    'turn-direct-lease',
+    workspace,
+    {
+      completionId: 'direct-lease-completion',
+      now: '2026-09-11T00:00:00.000Z',
+    },
+  ));
+  assert.equal(directLease.deliveryState, 'claimed_direct');
+  assert.equal(completions.requeueExpiredLeases({
+    now: '2026-09-11T00:00:29.999Z',
+  }), 0);
+  assert.equal(completions.getCompletion('direct-lease-completion').deliveryState, 'claimed_direct');
+  assert.equal(completions.requeueExpiredLeases({
+    now: '2026-09-11T00:00:30.000Z',
+  }), 1);
+  assert.equal(completions.getCompletion('direct-lease-completion').deliveryState, 'pending');
 });
 
-test('two racing hooks can claim a pending completion only once', async (t) => {
+test('two racing Hook Workers can claim a pending completion only once', async (t) => {
   const { dataDir, store } = await openStore(t);
   const executions = new ExecutionStore(store);
   const completions = new CompletionStore(store);
@@ -206,15 +239,118 @@ test('two racing hooks can claim a pending completion only once', async (t) => {
   });
   completions.insertCompletionFirst(terminal('thread-race', 'turn-race', workspace));
 
-  const racingStore = SqliteStore.open(dataDir);
-  const racingCompletions = new CompletionStore(racingStore);
-  t.after(() => racingStore.close());
-  const [first, second] = await Promise.all([
-    completions.claimPendingHook({ workspace, deliveryId: 'hook-a' }),
-    racingCompletions.claimPendingHook({ workspace, deliveryId: 'hook-b' }),
-  ]);
-  assert.equal(first.length + second.length, 1);
-  const claimed = first[0] ?? second[0];
+  const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const sqliteModule = new URL('../../src/adapters/sqlite/sqlite-store.mjs', import.meta.url).href;
+  const workerSource = `
+    const { parentPort, workerData } = require('node:worker_threads');
+    (async () => {
+      const { SqliteStore } = await import(workerData.sqliteModule);
+      const store = SqliteStore.open(workerData.dataDir);
+      parentPort.postMessage({ type: 'ready' });
+      Atomics.wait(new Int32Array(workerData.barrier), 0, 0);
+      const claimed = store.claimPendingHook({
+        workspace: workerData.workspace,
+        deliveryId: workerData.deliveryId,
+      });
+      parentPort.postMessage({
+        type: 'result',
+        count: claimed.length,
+        deliveryId: claimed[0]?.deliveryId ?? null,
+      });
+      store.close();
+    })().catch((error) => parentPort.postMessage({ type: 'error', message: error.message }));
+  `;
+  const workers = ['hook-a', 'hook-b'].map((deliveryId) => new Worker(workerSource, {
+    eval: true,
+    workerData: { barrier, dataDir, deliveryId, sqliteModule, workspace },
+  }));
+  t.after(() => Promise.all(workers.map((worker) => worker.terminate())));
+
+  function nextMessage(worker) {
+    return new Promise((resolve, reject) => {
+      const onMessage = (message) => {
+        cleanup();
+        if (message.type === 'error') reject(new Error(message.message));
+        else resolve(message);
+      };
+      const onError = (error) => {
+        cleanup();
+        reject(error);
+      };
+      const onExit = (code) => {
+        cleanup();
+        reject(new Error(`race worker exited before result: ${code}`));
+      };
+      const cleanup = () => {
+        worker.off('message', onMessage);
+        worker.off('error', onError);
+        worker.off('exit', onExit);
+      };
+      worker.once('message', onMessage);
+      worker.once('error', onError);
+      worker.once('exit', onExit);
+    });
+  }
+
+  await Promise.all(workers.map((worker) => nextMessage(worker)));
+  const results = workers.map((worker) => nextMessage(worker));
+  Atomics.store(new Int32Array(barrier), 0, 1);
+  Atomics.notify(new Int32Array(barrier), 0, workers.length);
+  const [first, second] = await Promise.all(results);
+  assert.equal(first.count + second.count, 1);
+  assert.equal([first.deliveryId, second.deliveryId].filter(Boolean).length, 1);
+  const claimed = completions.getCompletion('thread-race-turn-race-completion');
   assert.equal(claimed.deliveryState, 'claimed_hook');
-  assert.equal(completions.getCompletion(claimed.completionId).deliveryId, claimed.deliveryId);
+  assert.equal(claimed.deliveryId, first.deliveryId ?? second.deliveryId);
+});
+
+test('SqliteStore rejects payload identity and status conflicts', async (t) => {
+  const { store } = await openStore(t);
+  const completions = new CompletionStore(store);
+  const canonical = new TerminalResult({
+    threadId: 'payload-thread',
+    status: 'completed',
+    finalAssistantMessage: 'safe',
+    changes: { files: [] },
+  });
+
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      threadId: 'row-thread',
+      turnId: 'row-turn',
+      workspace: '/workspace/identity',
+      terminalResult: canonical,
+    }),
+    /threadId/,
+  );
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      threadId: 'row-thread',
+      turnId: 'row-turn',
+      workspace: '/workspace/identity',
+      terminalResult: {
+        threadId: 'row-thread',
+        turnId: 'other-turn',
+        status: 'completed',
+        finalAssistantMessage: 'wrong turn identity',
+        changes: { files: [] },
+      },
+    }),
+    /turnId/,
+  );
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      threadId: 'row-thread',
+      turnId: 'row-turn',
+      workspace: '/workspace/identity',
+      status: 'failed',
+      terminalResult: new TerminalResult({
+        threadId: 'row-thread',
+        status: 'completed',
+        finalAssistantMessage: 'safe',
+        changes: { files: [] },
+      }),
+    }),
+    /status/,
+  );
 });

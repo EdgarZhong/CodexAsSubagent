@@ -8,6 +8,7 @@ import { SqliteStore } from '../../src/adapters/sqlite/sqlite-store.mjs';
 import { CompletionRouter } from '../../src/core/completion-router.mjs';
 import { CompletionStore } from '../../src/core/completion-store.mjs';
 import { ExecutionStore } from '../../src/core/execution-store.mjs';
+import { TerminalResult } from '../../src/core/terminal-result.mjs';
 
 async function setup(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'codex-as-subagent-router-'));
@@ -91,26 +92,126 @@ test('CompletionRouter accepts normalized terminal events and preserves their sa
 
 test('CompletionRouter accepts an already-built canonical TerminalResult', async (t) => {
   const { store, completions, router } = await setup(t);
+  const terminalResult = new TerminalResult({
+    threadId: 'thread-canonical',
+    status: 'completed',
+    finalAssistantMessage: 'canonical complete',
+    changes: {
+      files: ['canonical-turn.mjs'],
+      filesChanged: 1,
+      filesTruncated: false,
+    },
+  });
   const result = router.onTerminal({
+    provenance: 'canonical',
     turnId: 'turn-canonical',
     workspace: '/workspace/router-canonical',
-    terminalResult: {
-      threadId: 'thread-canonical',
-      status: 'completed',
-      finalAssistantMessage: 'canonical complete',
-      changes: {
-        files: ['canonical-turn.mjs'],
-        filesChanged: 1,
-        filesTruncated: false,
-      },
-      error: null,
-    },
+    terminalResult,
   });
   assert.equal(result.deliveryState, 'pending');
   assert.equal(result.payload.finalAssistantMessage, 'canonical complete');
   assert.deepEqual(result.payload.changes.files, ['canonical-turn.mjs']);
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 1);
   assert.equal(completions.getCompletion(result.completionId).terminalStatus, 'completed');
+});
+
+test('CompletionRouter only accepts verified terminal types and matching identities', async (t) => {
+  const { store, executions, router } = await setup(t);
+  const workspace = '/workspace/router-negative';
+  executions.createExecution({
+    threadId: 'thread-negative',
+    turnId: 'turn-negative',
+    workspace,
+    ownerInstanceId: 'router-instance',
+  });
+
+  for (const event of [
+    {
+      type: 'error',
+      status: 'failed',
+      threadId: 'thread-negative',
+      turnId: 'turn-negative',
+    },
+    {
+      type: 'item.completed',
+      status: 'completed',
+      threadId: 'thread-negative',
+      turnId: 'turn-negative',
+    },
+  ]) {
+    assert.equal(router.onTerminal(event), null);
+  }
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+  assert.notEqual(executions.getExecution('thread-negative'), null);
+
+  assert.equal(router.onTerminal({
+    type: 'turn.completed',
+    status: 'failed',
+    threadId: 'thread-negative',
+    turnId: 'turn-negative',
+  }), null);
+  assert.equal(router.onTerminal({
+    type: 'turn.completed',
+    threadId: 'orphan-thread',
+    turnId: 'orphan-turn',
+  }), null);
+  assert.equal(router.onTerminal({
+    type: 'turn.completed',
+    threadId: 'thread-negative',
+    turnId: 'stale-turn',
+  }), null);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+  assert.notEqual(executions.getExecution('thread-negative'), null);
+
+  const mismatchedResult = new TerminalResult({
+    threadId: 'other-thread',
+    status: 'completed',
+    finalAssistantMessage: 'wrong identity',
+    changes: { files: [] },
+  });
+  assert.equal(router.onTerminal({
+    type: 'turn.completed',
+    threadId: 'thread-negative',
+    turnId: 'turn-negative',
+    terminalResult: mismatchedResult,
+  }), null);
+  assert.equal(router.onTerminal({
+    type: 'turn.completed',
+    threadId: 'thread-negative',
+    turnId: 'turn-negative',
+    terminalResult: new TerminalResult({
+      threadId: 'thread-negative',
+      status: 'failed',
+      lastAssistantMessage: 'wrong status',
+      changes: { files: [] },
+    }),
+  }), null);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+});
+
+test('CompletionRouter preserves truncated normalized change metadata', async (t) => {
+  const { executions, router } = await setup(t);
+  const workspace = '/workspace/router-truncated';
+  executions.createExecution({
+    threadId: 'thread-truncated',
+    turnId: 'turn-truncated',
+    workspace,
+    ownerInstanceId: 'router-instance',
+  });
+  const files = Array.from({ length: 20 }, (_, index) => `turn-file-${index}.mjs`);
+  const result = router.onTerminal({
+    type: 'turn.completed',
+    threadId: 'thread-truncated',
+    assistantMessage: 'truncated safely',
+    changes: {
+      files,
+      filesChanged: 25,
+      filesTruncated: true,
+    },
+  });
+  assert.equal(result.payload.changes.files.length, 20);
+  assert.equal(result.payload.changes.filesChanged, 25);
+  assert.equal(result.payload.changes.filesTruncated, true);
 });
 
 test('CompletionRouter routes a reserved direct terminal result without holding a delivery lock', async (t) => {
