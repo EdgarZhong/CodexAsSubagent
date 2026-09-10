@@ -679,3 +679,493 @@ node --check src/core/completion-router.mjs
 - 实现 commit：`adfb1fd`；本节报告随后作为独立文档 commit 提交。
 - 仍未启动真实 Codex app-server，未执行跨进程 Host Hook E2E；这属于后续 Runtime/Hook 验收范围。
 - status provenance hidden fields 只在 Adapter normalized object 内部使用；绕过 Adapter 的调用仍必须提供完整、互相一致的 terminal type、identity、status 和可信 provenance，否则 Router fail closed。
+
+## Fix round 5：关闭 status object 与多来源 identity/status fail-open
+
+- 状态：DONE。
+- 本轮基线：`85045ac780d86e0608ab0e2b664b12cda37f4347`。
+- 实现 commit：`23863ec028540b2e05a0e3bc1c2c1af63caebc6f`（`fix(task3): reject conflicting status and identity evidence`）。
+- 实现提交只包含获准的五个文件；本报告随后单独提交。未创建子 Agent，未回退或删除文件，未 push。
+- 未修改 SQLite schema、其他任务实现、package、README、AGENTS、CLAUDE 或 MCP public API。
+- 已按用户收束要求停止扩展；最终源码验证通过后只追加本节报告。
+
+### 变更与 findings 对应关系
+
+1. `src/shared/protocol.mjs`：移除 status object 的 `type ?? status` 优先级。共享 `statusSources` 收集所有显式 type/status/reason/terminalStatus/terminal_status/executionStatus 叶子来源；只接受明确列出的状态及别名。未知值、显式 undefined、空对象、循环 status object 产生 null 无效证据。所有来源一致才归一化为单个状态，冲突返回 null；terminal 入口拒绝 running 等非终端值。
+2. `src/adapters/supervisor/protocol-normalizer.mjs`：使用共享来源收集器，覆盖嵌套 status object 与 turn/turnRecord/currentTurn 的 type 字段；同时检查显式 method/type 来源是否矛盾。`normalizeTurn` 不再提前取 status.type。只有合法 terminal type、所有 status 来源与事件一致且 thread/turn 身份验证成功时，才输出 verified terminal status。现有不可枚举、冻结的 internalStatusSources/internalTurnIdentitySources 保留完整证据；enumerable event 不透传 raw params。
+3. `src/core/completion-router.mjs`：event、supplied result 原对象、其 toJSON payload、active execution 均调用同一个 `validateEvidence`。统一校验已知深层路径和各自 hidden sources/markers；拒绝组内及跨组身份或状态冲突。检查 TerminalResult 对象自身的证据，避免 toJSON 投影掩盖冲突。active execution 的已知状态必须合法且一致；normalized event 必须保留匹配的内部 turn 证据，不能从 execution 或 supplied result 回填缺失 event identity。canonical/recovery 的合法类型和 verified marker 门槛保留。
+4. `tests/unit/protocol-normalizer.test.mjs` 与 `tests/unit/completion-router.test.mjs`：新增八项顶层回归（包含多案例矩阵），覆盖 type/status 冲突、failed/completed 反向冲突、unknown/running/undefined、params.item/params.diff、turnRecord/currentTurn、turn.thread、hidden evidence、supplied TerminalResult 自身与投影、execution 嵌套冲突、method/type 冲突，以及合法 terminal 和 canonical/recovery 正向。
+5. Router 新增负向矩阵逐例检查返回 null、该 thread 的 completion 数量为零、execution 持久化记录与调用前相同。新增正向验证完整保留的 normalized event 可完成 execution，而其公开 JSON 投影即使附 supplied result 也不能补回内部身份。
+6. 原有 changes 总数与截断元数据、真实 Worker Hook race、direct lease 到期、canonical bypass 和 public projection 隔离测试全部保留并通过。
+
+### 修复前负向测试证据
+
+命令：
+
+```text
+rtk proxy node --test --test-name-pattern='status objects|all status object fields|conflicting evidence before|instance evidence before' tests/unit/protocol-normalizer.test.mjs tests/unit/completion-router.test.mjs
+```
+
+该命令在修改实现前运行，退出码 1；四项新增回归全部失败。以下为当时完整输出（行号对应当时测试文件）：
+
+```text
+✖ CompletionRouter rejects conflicting evidence before any durable mutation (19.283666ms)
+✖ CompletionRouter validates TerminalResult instance evidence before toJSON projection (2.984958ms)
+✖ status objects require agreement of every explicit field (0.624292ms)
+✖ normalizeEvent validates all status object fields at deep raw boundaries (2.013375ms)
+ℹ tests 4
+ℹ suites 0
+ℹ pass 0
+ℹ fail 4
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 59.930459
+
+✖ failing tests:
+
+test at tests/unit/completion-router.test.mjs:27:1
+✖ CompletionRouter rejects conflicting evidence before any durable mutation (19.283666ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+
+  + [
+  +   'event.status/failed',
+  +   'params.item/failed',
+  +   'params.diff/failed',
+  +   'hidden.status/failed',
+  +   'result.turn/failed',
+  +   'result.turnRecord/failed',
+  +   'result.currentTurn/failed',
+  +   'execution.status/failed',
+  +   'event.status/running',
+  +   'params.item/running',
+  +   'params.diff/running',
+  +   'hidden.status/running',
+  +   'result.turn/running',
+  +   'result.turnRecord/running',
+  +   'result.currentTurn/running',
+  +   'event.status/unknown',
+  +   'params.item/unknown',
+  +   'params.diff/unknown',
+  +   'hidden.status/unknown',
+  +   'result.turn/unknown',
+  +   'result.turnRecord/unknown',
+  +   'result.currentTurn/unknown',
+  +   'execution.status/unknown',
+  +   'event.status/undefined',
+  +   'params.item/undefined',
+  +   'params.diff/undefined',
+  +   'hidden.status/undefined',
+  +   'result.turn/undefined',
+  +   'result.turnRecord/undefined',
+  +   'result.currentTurn/undefined',
+  +   'execution.status/undefined',
+  +   'event.turn.type',
+  +   'event.turnRecord.type',
+  +   'event.currentTurn.type',
+  +   'execution.active disagreement',
+  +   'hidden result identity',
+  +   'hidden execution identity',
+  +   'hidden result status'
+  + ]
+  - []
+
+      at TestContext.<anonymous> (file:///Users/edgar/programs/CodexAsSubagent/tests/unit/completion-router.test.mjs:85:10)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [
+      'event.status/failed',           'params.item/failed',
+      'params.diff/failed',            'hidden.status/failed',
+      'result.turn/failed',            'result.turnRecord/failed',
+      'result.currentTurn/failed',     'execution.status/failed',
+      'event.status/running',          'params.item/running',
+      'params.diff/running',           'hidden.status/running',
+      'result.turn/running',           'result.turnRecord/running',
+      'result.currentTurn/running',    'event.status/unknown',
+      'params.item/unknown',           'params.diff/unknown',
+      'hidden.status/unknown',         'result.turn/unknown',
+      'result.turnRecord/unknown',     'result.currentTurn/unknown',
+      'execution.status/unknown',      'event.status/undefined',
+      'params.item/undefined',         'params.diff/undefined',
+      'hidden.status/undefined',       'result.turn/undefined',
+      'result.turnRecord/undefined',   'result.currentTurn/undefined',
+      'execution.status/undefined',    'event.turn.type',
+      'event.turnRecord.type',         'event.currentTurn.type',
+      'execution.active disagreement', 'hidden result identity',
+      'hidden execution identity',     'hidden result status'
+    ],
+    expected: [],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/completion-router.test.mjs:88:1
+✖ CompletionRouter validates TerminalResult instance evidence before toJSON projection (2.984958ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+
+  + [
+  +   0,
+  +   1,
+  +   2
+  + ]
+  - []
+
+      at TestContext.<anonymous> (file:///Users/edgar/programs/CodexAsSubagent/tests/unit/completion-router.test.mjs:103:10)
+      at async Test.run (node:internal/test_runner/test:1208:7)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:831:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [ 0, 1, 2 ],
+    expected: [],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/protocol-normalizer.test.mjs:18:1
+✖ status objects require agreement of every explicit field (0.624292ms)
+  AssertionError [ERR_ASSERTION]: {"type":"completed","status":"failed"}
+  + actual - expected
+
+  + 'completed'
+  - null
+
+      at TestContext.<anonymous> (file:///Users/edgar/programs/CodexAsSubagent/tests/unit/protocol-normalizer.test.mjs:27:12)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.start (node:internal/test_runner/test:1096:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:385:17) {
+    generatedMessage: false,
+    code: 'ERR_ASSERTION',
+    actual: 'completed',
+    expected: null,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/unit/protocol-normalizer.test.mjs:34:1
+✖ normalizeEvent validates all status object fields at deep raw boundaries (2.013375ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal:
+  + actual - expected
+
+  + [
+  +   'completed/item/failed',
+  +   'completed/diff/failed',
+  +   'completed/item/interrupted',
+  +   'completed/diff/interrupted',
+  +   'completed/item/unknown',
+  +   'completed/diff/unknown',
+  +   'completed/item/running',
+  +   'completed/diff/running',
+  +   'failed/item/completed',
+  +   'failed/diff/completed',
+  +   'failed/item/interrupted',
+  +   'failed/diff/interrupted',
+  +   'failed/item/unknown',
+  +   'failed/diff/unknown',
+  +   'failed/item/running',
+  +   'failed/diff/running',
+  +   'interrupted/item/completed',
+  +   'interrupted/diff/completed',
+  +   'interrupted/item/failed',
+  +   'interrupted/diff/failed',
+  +   'interrupted/item/unknown',
+  +   'interrupted/diff/unknown',
+  +   'interrupted/item/running',
+  +   'interrupted/diff/running',
+  +   'turn.type',
+  +   'turnRecord.type',
+  +   'currentTurn.type'
+  + ]
+  - []
+
+      at TestContext.<anonymous> (file:///Users/edgar/programs/CodexAsSubagent/tests/unit/protocol-normalizer.test.mjs:62:10)
+      at Test.runInAsyncScope (node:async_hooks:227:14)
+      at Test.run (node:internal/test_runner/test:1201:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:831:18)
+      at Test.postRun (node:internal/test_runner/test:1330:19)
+      at Test.run (node:internal/test_runner/test:1258:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:385:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: [
+      'completed/item/failed',      'completed/diff/failed',
+      'completed/item/interrupted', 'completed/diff/interrupted',
+      'completed/item/unknown',     'completed/diff/unknown',
+      'completed/item/running',     'completed/diff/running',
+      'failed/item/completed',      'failed/diff/completed',
+      'failed/item/interrupted',    'failed/diff/interrupted',
+      'failed/item/unknown',        'failed/diff/unknown',
+      'failed/item/running',        'failed/diff/running',
+      'interrupted/item/completed', 'interrupted/diff/completed',
+      'interrupted/item/failed',    'interrupted/diff/failed',
+      'interrupted/item/unknown',   'interrupted/diff/unknown',
+      'interrupted/item/running',   'interrupted/diff/running',
+      'turn.type',                  'turnRecord.type',
+      'currentTurn.type'
+    ],
+    expected: [],
+    operator: 'deepStrictEqual',
+    diff: 'simple'
+  }
+```
+
+后续针对 method/type 和显式 undefined hidden status 的补充负例也先复现失败，再修复。最终验证如下。
+
+### 最终验证命令与完整输出
+
+#### 全量测试
+
+命令：
+
+```text
+rtk proxy npm test
+```
+
+完整输出：
+
+```text
+> codex-as-subagent@0.1.0 test
+> node --test 'tests/**/*.test.mjs'
+
+✔ CompletionRouter rejects conflicting evidence before any durable mutation (17.349083ms)
+✔ CompletionRouter validates TerminalResult instance evidence before toJSON projection (3.101167ms)
+✔ CompletionRouter requires retained turn identity and accepts consistent terminal evidence (4.295875ms)
+✔ CompletionRouter gates orphan canonical and recovery results on type and verification (3.084458ms)
+✔ CompletionRouter persists terminal result first and ignores non-terminal events (4.041042ms)
+✔ CompletionRouter accepts normalized terminal events and preserves their safe turn changes (2.432583ms)
+✔ CompletionRouter accepts valid failed and interrupted terminal events (2.844042ms)
+✔ CompletionRouter accepts an already-built verified recovery TerminalResult (2.815834ms)
+✔ CompletionRouter only accepts verified terminal types and matching identities (11.998625ms)
+✔ CompletionRouter rejects nested status and identity conflicts (7.527417ms)
+✔ CompletionRouter rejects nested supplied-result status and identity conflicts (3.167583ms)
+✔ CompletionRouter rejects conflicting nested active-execution evidence (2.9055ms)
+✔ CompletionRouter preserves truncated normalized change metadata (2.541334ms)
+✔ CompletionRouter routes a reserved direct terminal result without holding a delivery lock (2.837417ms)
+✔ project layout exposes the V1 foundation (4.133875ms)
+✔ status objects require agreement of every explicit field (0.733833ms)
+✔ normalizeEvent validates all status object fields at deep raw boundaries (2.809083ms)
+✔ normalizeEvent preserves deep identity conflicts as hidden evidence (0.415ms)
+✔ normalizeEvent rejects conflicting explicit event discriminators (0.19475ms)
+✔ normalizeEvent returns a bounded public projection without internal ids (0.3095ms)
+✔ normalizeEvent rejects conflicting thread and turn identities (0.117833ms)
+✔ normalizeEvent preserves terminal status provenance and rejects status conflicts (0.3825ms)
+✔ normalizeEvent fails closed for deep turn status and identity evidence (0.697834ms)
+✔ normalizeEvent rejects nested thread and turn identity conflicts as non-terminal (0.103208ms)
+✔ normalizeEvent supports vendor EventStore params.turn, params.item and params.diff (0.192125ms)
+✔ ordinary error and item completion are not terminal events (0.168292ms)
+✔ changed files come only from the current turn structured record (0.138375ms)
+✔ history adapter exposes turn-scoped history and never queries repository git state (0.248167ms)
+✔ publicProjection recursively removes internal protocol fields (0.055292ms)
+✔ supervisor adapter defines the complete fake contract and maps operations (0.563709ms)
+✔ supervisor adapter bridges events from an injected EventStore (0.105209ms)
+✔ supervisor adapter emits one thread-scoped terminal event per active process failure (1.144958ms)
+✔ fake adapter rejects invalid or unknown injected implementations (0.200875ms)
+✔ SqliteStore creates the durable schema and required SQLite pragmas (4.520375ms)
+✔ terminal completion commits before delivery and duplicate thread/turn is idempotent (5.488792ms)
+✔ direct reservation uses compare-and-set, ACK is required, and expired leases requeue (5.507541ms)
+✔ two racing Hook Workers can claim a pending completion only once (28.790542ms)
+✔ SqliteStore rejects payload identity and status conflicts (11.5235ms)
+✔ TerminalResult completed payload is bounded and strips internal fields (1.783834ms)
+✔ TerminalResult failed and interrupted payloads preserve safe terminal details (1.041ms)
+✔ TerminalResult omits invalid duration values (0.131958ms)
+✔ TerminalResult rejects non-terminal status (0.200792ms)
+✔ TerminalResult requires verified turn provenance and a non-empty thread id (0.130834ms)
+✔ ModelService resolves default and explicit model/effort pairs (0.391541ms)
+✔ WorkspaceGuard.resolve returns the canonical realpath (3.119708ms)
+✔ WorkspaceGuard.resolve rejects a missing workspace (1.033708ms)
+✔ WorkspaceGuard.assertThreadWorkspace fails closed for missing metadata and cross-workspace threads (1.702208ms)
+ℹ tests 47
+ℹ suites 0
+ℹ pass 47
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 128.069542
+```
+
+退出码：`0`。
+
+#### Task 3 focused
+
+命令：
+
+```text
+rtk proxy node --test tests/unit/sqlite-store.test.mjs tests/unit/completion-router.test.mjs
+```
+
+完整输出：
+
+```text
+✔ CompletionRouter rejects conflicting evidence before any durable mutation (42.965333ms)
+✔ CompletionRouter validates TerminalResult instance evidence before toJSON projection (6.0235ms)
+✔ CompletionRouter requires retained turn identity and accepts consistent terminal evidence (7.417792ms)
+✔ CompletionRouter gates orphan canonical and recovery results on type and verification (3.390459ms)
+✔ CompletionRouter persists terminal result first and ignores non-terminal events (3.045083ms)
+✔ CompletionRouter accepts normalized terminal events and preserves their safe turn changes (2.928875ms)
+✔ CompletionRouter accepts valid failed and interrupted terminal events (4.21275ms)
+✔ CompletionRouter accepts an already-built verified recovery TerminalResult (2.781542ms)
+✔ CompletionRouter only accepts verified terminal types and matching identities (3.01875ms)
+✔ CompletionRouter rejects nested status and identity conflicts (2.572542ms)
+✔ CompletionRouter rejects nested supplied-result status and identity conflicts (2.85275ms)
+✔ CompletionRouter rejects conflicting nested active-execution evidence (3.515292ms)
+✔ CompletionRouter preserves truncated normalized change metadata (2.321541ms)
+✔ CompletionRouter routes a reserved direct terminal result without holding a delivery lock (2.721583ms)
+✔ SqliteStore creates the durable schema and required SQLite pragmas (10.183583ms)
+✔ terminal completion commits before delivery and duplicate thread/turn is idempotent (17.228375ms)
+✔ direct reservation uses compare-and-set, ACK is required, and expired leases requeue (6.23225ms)
+✔ two racing Hook Workers can claim a pending completion only once (42.822083ms)
+✔ SqliteStore rejects payload identity and status conflicts (3.034791ms)
+ℹ tests 19
+ℹ suites 0
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 162.07225
+```
+
+退出码：`0`。
+
+#### Task 2 normalizer focused
+
+命令：
+
+```text
+rtk proxy node --test tests/unit/protocol-normalizer.test.mjs
+```
+
+完整输出：
+
+```text
+✔ status objects require agreement of every explicit field (1.049875ms)
+✔ normalizeEvent validates all status object fields at deep raw boundaries (2.448292ms)
+✔ normalizeEvent preserves deep identity conflicts as hidden evidence (0.422958ms)
+✔ normalizeEvent rejects conflicting explicit event discriminators (0.147ms)
+✔ normalizeEvent returns a bounded public projection without internal ids (0.179625ms)
+✔ normalizeEvent rejects conflicting thread and turn identities (0.068667ms)
+✔ normalizeEvent preserves terminal status provenance and rejects status conflicts (0.213416ms)
+✔ normalizeEvent fails closed for deep turn status and identity evidence (0.682583ms)
+✔ normalizeEvent rejects nested thread and turn identity conflicts as non-terminal (0.226792ms)
+✔ normalizeEvent supports vendor EventStore params.turn, params.item and params.diff (0.446041ms)
+✔ ordinary error and item completion are not terminal events (0.389708ms)
+✔ changed files come only from the current turn structured record (0.275958ms)
+✔ history adapter exposes turn-scoped history and never queries repository git state (0.449ms)
+✔ publicProjection recursively removes internal protocol fields (0.073916ms)
+✔ supervisor adapter defines the complete fake contract and maps operations (0.958583ms)
+✔ supervisor adapter bridges events from an injected EventStore (0.214459ms)
+✔ supervisor adapter emits one thread-scoped terminal event per active process failure (1.685375ms)
+✔ fake adapter rejects invalid or unknown injected implementations (0.2295ms)
+ℹ tests 18
+ℹ suites 0
+ℹ pass 18
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 85.770084
+```
+
+退出码：`0`。
+
+#### 相关 node --check 与 git diff --check
+
+命令：
+
+```text
+rtk proxy sh -c 'for file in src/shared/protocol.mjs src/adapters/supervisor/protocol-normalizer.mjs src/adapters/supervisor/app-server-adapter.mjs src/adapters/supervisor/history-adapter.mjs src/adapters/sqlite/sqlite-store.mjs src/core/terminal-result.mjs src/core/execution-store.mjs src/core/completion-store.mjs src/core/completion-router.mjs tests/unit/protocol-normalizer.test.mjs tests/unit/completion-router.test.mjs tests/unit/sqlite-store.test.mjs; do node --check "$file" || exit; done; git diff --check'
+```
+
+完整输出：
+
+```text
+（无输出）
+```
+
+退出码：`0`。
+
+#### lint
+
+命令：
+
+```text
+rtk proxy npm run lint
+```
+
+完整输出：
+
+```text
+> codex-as-subagent@0.1.0 lint
+> node --check src/cli/main.mjs
+```
+
+退出码：`0`。
+
+#### CLI smoke
+
+命令：
+
+```text
+rtk proxy npm run smoke
+```
+
+完整输出：
+
+```text
+> codex-as-subagent@0.1.0 smoke
+> ./src/cli/main.mjs --help
+
+Codex As Subagent
+
+用法:
+  codex-as-subagent [command] [--help]
+
+命令:
+  serve    启动 Runtime Server
+  mcp      启动 MCP stdio Bootstrap
+  hook     运行 Host Hook wrapper
+  drain    读取并交付待处理 completion
+
+默认模型: gpt-5.6-luna
+默认 effort: xhigh
+```
+
+退出码：`0`。
+
+### 提交与最终判断
+
+实现提交命令：
+
+```text
+rtk proxy sh -c 'git status --short && git add -- src/shared/protocol.mjs src/adapters/supervisor/protocol-normalizer.mjs src/core/completion-router.mjs tests/unit/protocol-normalizer.test.mjs tests/unit/completion-router.test.mjs && git diff --cached --check && git commit -m "fix(task3): reject conflicting status and identity evidence" && git rev-parse HEAD'
+```
+
+完整输出：
+
+```text
+M src/adapters/supervisor/protocol-normalizer.mjs
+ M src/core/completion-router.mjs
+ M src/shared/protocol.mjs
+ M tests/unit/completion-router.test.mjs
+ M tests/unit/protocol-normalizer.test.mjs
+[codex/autonomous-v1 23863ec] fix(task3): reject conflicting status and identity evidence
+ 5 files changed, 350 insertions(+), 97 deletions(-)
+23863ec028540b2e05a0e3bc1c2c1af63caebc6f
+```
+
+- 全量 `npm test`：47/47 通过；Task 3 focused：19/19；Task 2 normalizer：18/18。
+- 12 个相关源码/测试文件的 `node --check`、`git diff --check`、lint、smoke 全部退出码 0。
+- 以上测试针对实现提交的源码运行，之后未修改源码。追加报告前核验 HEAD 仍为 `23863ec`，工作区干净。
+- 本轮指定的两项 findings 已在上述负向及正向路径中关闭，无已知待修复残留。
+
+### Concerns 与验证边界
+
+- 未运行真实 Codex app-server 或跨进程 Host Hook E2E；本轮覆盖 Adapter 归一化、Router、SQLite 以及真实 Worker 的并发 claim，不能替代后续 Runtime/Host 集成验收。
+- 当前 `npm run lint` 仅检查 CLI，故本轮额外检查了 12 个相关文件；`npm run smoke` 仅验证 CLI help。
+- 内部身份 evidence 依赖不可枚举属性。公开 JSON 投影丢失这些信息后会 fail closed；调用方必须保留 Adapter 原始归一化对象供 Router 使用。
+- 本报告作为独立文档提交保存；最终 HEAD 以报告提交后的 Git 返回值为准。
