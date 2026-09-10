@@ -1,6 +1,8 @@
 import {
   isRecord,
-  normalizeTerminalStatus,
+  normalizeStatus,
+  statusSources,
+  STATUS_EVIDENCE_FIELDS,
   safeError,
   summarizeChangedFiles,
   truncateAssistantMessage,
@@ -11,14 +13,13 @@ function firstString(...values) {
 }
 
 function identityState(candidates) {
-  const present = candidates.filter(({ value }) => value !== undefined);
-  const values = present.map(({ value }) => value);
+  const values = candidates.map(({ value }) => value);
   const valid = values.every((value) => typeof value === 'string' && value.length > 0);
   const consistent = valid && new Set(values).size === 1;
   return {
     value: consistent ? values[0] : null,
     verified: consistent && values.length > 0,
-    sources: present.map(({ source, value }) => ({ source, value })),
+    sources: candidates.map(({ source, value }) => ({ source, value })),
   };
 }
 
@@ -27,7 +28,6 @@ function eventParams(event) {
 }
 
 const TURN_EVIDENCE_KEYS = Object.freeze(['turn', 'turnRecord', 'currentTurn']);
-const STATUS_EVIDENCE_FIELDS = Object.freeze(['status', 'reason', 'terminalStatus', 'terminal_status']);
 
 function collectTurnEvidenceRecords(roots) {
   const evidence = [];
@@ -281,8 +281,14 @@ function isProcessFailure(event, normalizedMethod = '') {
 function eventType(event) {
   const params = eventParams(event);
   const method = firstString(event?.method, event?.type, params.method) ?? 'unknown';
+  if (isProcessFailure(event, method.replaceAll('/', '.'))) return 'supervisor.process.failed';
+  return methodType(method);
+}
+
+function methodType(method) {
+  if (typeof method !== 'string') return 'unknown';
   const normalized = method.replaceAll('/', '.');
-  if (isProcessFailure(event, normalized)) return 'supervisor.process.failed';
+  if (isProcessFailure({ type: method }, normalized)) return 'supervisor.process.failed';
   if (normalized === 'turn.completed' || normalized === 'turn.complete') return 'turn.completed';
   if (normalized === 'turn.failed' || normalized === 'turn.error') return 'turn.failed';
   if (normalized === 'turn.interrupted' || normalized === 'turn.cancelled' || normalized === 'turn.canceled') {
@@ -306,13 +312,22 @@ const TERMINAL_EVENT_STATUSES = new Map([
 
 function collectStatusSources(event) {
   const sources = [{ source: 'event.type', status: null }];
+  for (const [source, record, field] of [
+    ['event.method', event, 'method'], ['event.type', event, 'type'],
+    ['params.method', eventParams(event), 'method'],
+  ]) {
+    if (!isRecord(record) || !Object.hasOwn(record, field)) continue;
+    const type = methodType(record[field]);
+    // A process lifecycle error is the adapter's explicit thread-scoped crash signal.
+    const status = type === 'error' && isProcessFailure(event)
+      ? 'failed' : TERMINAL_EVENT_STATUSES.get(type) ?? null;
+    sources.push({ source, status });
+  }
   for (const evidence of eventEvidenceRecords(event)) {
-    for (const field of STATUS_EVIDENCE_FIELDS) {
+    const fields = evidence.isTurnRecord ? ['type', ...STATUS_EVIDENCE_FIELDS] : STATUS_EVIDENCE_FIELDS;
+    for (const field of fields) {
       if (Object.hasOwn(evidence.value, field)) {
-        sources.push({
-          source: `${evidence.source}.${field}`,
-          status: normalizeTerminalStatus(evidence.value[field]),
-        });
+        sources.push(...statusSources(evidence.value[field], `${evidence.source}.${field}`));
       }
     }
   }
@@ -416,8 +431,7 @@ export function normalizeTurn(turn) {
   if (!isRecord(turn)) {
     return null;
   }
-  const rawStatus = turn.status?.type ?? turn.status;
-  const status = typeof rawStatus === 'string' ? normalizeTerminalStatus(rawStatus) ?? rawStatus : null;
+  const status = normalizeStatus(turn);
   const message = extractAssistantMessage(turn);
   const result = {};
   if (status) result.status = status;

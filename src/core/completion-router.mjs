@@ -1,7 +1,7 @@
 import { TerminalResult } from './terminal-result.mjs';
 import { CompletionStore } from './completion-store.mjs';
 import { ExecutionStore } from './execution-store.mjs';
-import { normalizeTerminalStatus } from '../shared/protocol.mjs';
+import { normalizeStatus, normalizeTerminalStatus, STATUS_EVIDENCE_FIELDS } from '../shared/protocol.mjs';
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -41,7 +41,6 @@ function trustedRecovery(event, suppliedResult) {
 }
 
 const TURN_EVIDENCE_KEYS = Object.freeze(['turn', 'turnRecord', 'currentTurn']);
-const STATUS_EVIDENCE_FIELDS = Object.freeze(['status', 'reason', 'terminalStatus', 'terminal_status']);
 
 function collectTurnEvidenceRecords(value, prefix) {
   if (!isRecord(value)) return [];
@@ -114,17 +113,18 @@ function turnIdentityValues(evidenceRecords) {
   return values;
 }
 
-function statusEvidenceValues(evidenceRecords, extraFields = []) {
+function statusEvidenceValues(evidenceRecords, includeRootType = false) {
   const values = [];
-  const fields = [...STATUS_EVIDENCE_FIELDS, ...extraFields];
-  for (const evidence of evidenceRecords) ownValues(values, evidence, fields);
+  for (const [index, evidence] of evidenceRecords.entries()) {
+    ownValues(values, evidence, STATUS_EVIDENCE_FIELDS);
+    if (evidence.isTurnRecord || (index === 0 && includeRootType)) ownValues(values, evidence, ['type']);
+  }
   return values;
 }
 
 function collectIdentityValues(values) {
   const identities = [];
   for (const value of values) {
-    if (value === undefined) continue;
     if (typeof value !== 'string' || value.length === 0) return null;
     identities.push(value);
   }
@@ -137,7 +137,7 @@ function consistentIdentity(values) {
 
 function hiddenSourceValues(event, key) {
   const sources = event?.[key];
-  if (sources === undefined) return [];
+  if (!Object.hasOwn(event, key)) return [];
   if (!Array.isArray(sources) || sources.length === 0) return null;
   return sources.map((source) => (
     isRecord(source) && Object.hasOwn(source, 'value') ? source.value : null
@@ -146,23 +146,22 @@ function hiddenSourceValues(event, key) {
 
 function hiddenStatusValues(event) {
   const sources = event?.internalStatusSources;
-  if (sources === undefined) return [];
+  if (!Object.hasOwn(event, 'internalStatusSources')) return [];
   if (!Array.isArray(sources) || sources.length === 0) return null;
   return sources.map((source) => (
-    isRecord(source) && Object.hasOwn(source, 'status') ? source.status : null
+    isRecord(source) && Object.hasOwn(source, 'status') ? source : null
   ));
 }
 
 function verifiedMarkerMatches(event, marker, sourceValues) {
-  if (event?.[marker] === undefined) return sourceValues !== null && sourceValues.length === 0;
+  if (!Object.hasOwn(event, marker)) return sourceValues !== null && sourceValues.length === 0;
   return event[marker] === true && sourceValues !== null && sourceValues.length > 0;
 }
 
-function collectStatusValues(values) {
+function collectStatusValues(values, normalize = normalizeTerminalStatus) {
   const statuses = [];
   for (const value of values) {
-    if (value === undefined) continue;
-    const status = normalizeTerminalStatus(value);
+    const status = normalize(value);
     if (!status) return null;
     statuses.push(status);
   }
@@ -182,34 +181,40 @@ const ACTIVE_EXECUTION_STATUS_TOKENS = new Set([
   'waitingonapproval',
 ]);
 
-function statusToken(value) {
-  if (isRecord(value)) return statusToken(value.type ?? value.status);
-  return typeof value === 'string'
-    ? value.toLowerCase().replaceAll(/[-_\s]/g, '')
-    : null;
+// The same gate applies to raw/hidden event, result and active-execution evidence.
+function validateEvidence(value, prefix, { active = false, includeRootType = false } = {}) {
+  if (!isRecord(value)) return null;
+  const records = collectTurnEvidenceRecords(value, prefix);
+  const threadValues = threadIdentityValues(records);
+  const turnValues = turnIdentityValues(records);
+  const statusValues = statusEvidenceValues(records, includeRootType);
+  for (const { value: record } of records) {
+    const hiddenThreads = hiddenSourceValues(record, 'internalThreadIdentitySources');
+    const hiddenTurns = hiddenSourceValues(record, 'internalTurnIdentitySources');
+    const hiddenStatuses = hiddenStatusValues(record);
+    if (!verifiedMarkerMatches(record, 'verifiedThreadIdentity', hiddenThreads)
+      || !verifiedMarkerMatches(record, 'verifiedTurnIdentity', hiddenTurns)
+      || !verifiedMarkerMatches(record, 'verifiedTerminalStatus', hiddenStatuses)) return null;
+    threadValues.push(...hiddenThreads);
+    turnValues.push(...hiddenTurns);
+    statusValues.push(...hiddenStatuses);
+  }
+  const threadIds = collectIdentityValues(threadValues);
+  const turnIds = collectIdentityValues(turnValues);
+  const statuses = collectStatusValues(statusValues, active ? normalizeStatus : normalizeTerminalStatus);
+  if (!consistentIdentity(threadIds) || !consistentIdentity(turnIds)
+    || statuses === null || new Set(statuses).size > 1
+    || (active && statuses.some((status) => !ACTIVE_EXECUTION_STATUS_TOKENS.has(status)))) return null;
+  return { threadIds, turnIds, statuses };
 }
 
-function activeExecutionStatusIsConsistent(execution) {
-  const values = statusEvidenceValues(
-    collectTurnEvidenceRecords(execution, 'execution'),
-    ['executionStatus'],
-  );
-  return values.every((value) => (
-    !normalizeTerminalStatus(value) && ACTIVE_EXECUTION_STATUS_TOKENS.has(statusToken(value))
-  ));
-}
-
-function terminalStatus(event, eventEvidence, resultEvidence, suppliedResult) {
-  const hiddenStatuses = hiddenStatusValues(event);
-  if (event.internalStatusSources !== undefined
-    && (!verifiedMarkerMatches(event, 'verifiedTerminalStatus', hiddenStatuses))) return null;
-  if (event.verifiedTerminalStatus !== undefined && event.verifiedTerminalStatus !== true) return null;
+function terminalStatus(event, evidence, suppliedResult) {
+  for (const record of [event, event.params]) {
+    if (isRecord(record) && Object.hasOwn(record, 'method')
+      && eventType({ type: record.method }) !== eventType(event)) return null;
+  }
   const verifiedTypeStatus = VERIFIED_TERMINAL_TYPES.get(eventType(event));
-  const statuses = collectStatusValues([
-    ...statusEvidenceValues(eventEvidence),
-    ...(hiddenStatuses ?? []),
-    ...statusEvidenceValues(resultEvidence),
-  ]);
+  const statuses = evidence.flatMap((entry) => entry.statuses);
   if (verifiedTypeStatus) {
     return statusMatches(statuses, verifiedTypeStatus) ? verifiedTypeStatus : null;
   }
@@ -256,64 +261,46 @@ export class CompletionRouter {
   onTerminal(event = {}) {
     if (!isRecord(event)) return null;
     const suppliedResults = [event.terminalResult, event.result].filter((result) => result !== undefined && result !== null);
+    const resultEvidence = suppliedResults.map((result, index) => (
+      validateEvidence(result, `result[${index}]`, { includeRootType: true })
+    ));
+    if (resultEvidence.some((evidence) => evidence === null)) return null;
     const suppliedPayloads = suppliedResults.map((result) => (
       typeof result?.toJSON === 'function' ? result.toJSON() : isRecord(result) ? result : null
     ));
-    if (suppliedPayloads.some((payload) => payload === null)) return null;
+    if (suppliedPayloads.some((payload) => !isRecord(payload))) return null;
     const suppliedResult = suppliedResults[0] ?? null;
-    const suppliedPayload = suppliedPayloads[0] ?? null;
-    const eventEvidence = collectTurnEvidenceRecords(event, 'event');
-    const resultEvidence = suppliedPayloads.flatMap((payload, index) => (
-      collectTurnEvidenceRecords(payload, `result[${index}]`)
+    const eventEvidence = validateEvidence(event, 'event');
+    const payloadEvidence = suppliedPayloads.map((payload, index) => (
+      validateEvidence(payload, `payload[${index}]`, { includeRootType: true })
     ));
-    const status = terminalStatus(event, eventEvidence, resultEvidence, suppliedResult);
+    if (!eventEvidence || payloadEvidence.some((evidence) => evidence === null)) return null;
+    const evidence = [eventEvidence, ...resultEvidence, ...payloadEvidence];
+    const status = terminalStatus(event, evidence, suppliedResult);
     if (!status) return null;
     if (suppliedResults.length > 0 && suppliedPayloads.some((payload) => !payload?.status)) return null;
 
-    const hiddenThreadIds = hiddenSourceValues(event, 'internalThreadIdentitySources');
-    const hiddenTurnIds = hiddenSourceValues(event, 'internalTurnIdentitySources');
-    if (!verifiedMarkerMatches(event, 'verifiedThreadIdentity', hiddenThreadIds)
-      || !verifiedMarkerMatches(event, 'verifiedTurnIdentity', hiddenTurnIds)) return null;
-    const eventThreadIds = collectIdentityValues([
-      ...threadIdentityValues(eventEvidence),
-      ...(hiddenThreadIds ?? []),
-    ]);
-    const resultThreadIds = collectIdentityValues(threadIdentityValues(resultEvidence));
-    if (!consistentIdentity(eventThreadIds)
-      || !consistentIdentity(resultThreadIds)
-      || !consistentIdentity([...eventThreadIds, ...resultThreadIds])) return null;
-    const threadIds = [...eventThreadIds, ...resultThreadIds];
+    const threadIds = evidence.flatMap((entry) => entry.threadIds);
+    const turnIds = evidence.flatMap((entry) => entry.turnIds);
+    if (!consistentIdentity(threadIds) || !consistentIdentity(turnIds)) return null;
     const threadId = firstString(...threadIds);
     if (!threadId) return null;
 
     const knownExecution = this.executions?.getExecution(threadId) ?? null;
-    if (knownExecution && !activeExecutionStatusIsConsistent(knownExecution)) return null;
-    if (event.verifiedTurnIdentity !== undefined && event.verifiedTurnIdentity !== true) return null;
-    const eventTurnIds = collectIdentityValues([
-      ...turnIdentityValues(eventEvidence),
-      ...(hiddenTurnIds ?? []),
-    ]);
-    const resultTurnIds = collectIdentityValues(turnIdentityValues(resultEvidence));
-    if (!consistentIdentity(eventTurnIds) || !consistentIdentity(resultTurnIds)) return null;
-    const turnIds = [...eventTurnIds, ...resultTurnIds];
-    if (!consistentIdentity(turnIds)) return null;
-    const eventTurnId = firstString(...eventTurnIds);
-    const resultTurnId = firstString(...resultTurnIds);
-    const executionEvidence = collectTurnEvidenceRecords(knownExecution, 'execution');
-    const executionThreadIds = collectIdentityValues(threadIdentityValues(executionEvidence));
-    const executionTurnIds = collectIdentityValues(turnIdentityValues(executionEvidence));
+    const eventTurnId = firstString(...eventEvidence.turnIds);
+    const executionEvidence = knownExecution
+      ? validateEvidence(knownExecution, 'execution', { active: true, includeRootType: true }) : null;
     if (knownExecution && (
-      !consistentIdentity(executionThreadIds)
-      || !consistentIdentity(executionTurnIds)
-      || !consistentIdentity([...eventThreadIds, ...resultThreadIds, ...executionThreadIds])
-      || !consistentIdentity([...eventTurnIds, ...resultTurnIds, ...executionTurnIds])
+      !executionEvidence
+      || !consistentIdentity([...threadIds, ...executionEvidence.threadIds])
+      || !consistentIdentity([...turnIds, ...executionEvidence.turnIds])
+      || !eventTurnId || eventTurnId !== firstString(...executionEvidence.turnIds)
     )) return null;
-    if (knownExecution && (!eventTurnId || eventTurnId !== firstString(...executionTurnIds))) return null;
     if (knownExecution && event.workspace !== undefined && event.workspace !== knownExecution.workspace) return null;
     if (!knownExecution
       && !trustedCanonical(event, suppliedResult)
       && !trustedRecovery(event, suppliedResult)) return null;
-    const turnId = eventTurnId ?? resultTurnId;
+    const turnId = firstString(...turnIds);
     if (!turnId) return null;
 
     const terminalResult = suppliedResult ?? TerminalResult.fromTerminal({
@@ -321,7 +308,6 @@ export class CompletionRouter {
       threadId,
       turnId,
       status,
-      ...(suppliedPayload ? { ...suppliedPayload } : {}),
       ...(!event.turn && isRecord(event.changes)
         ? {
           turn: {

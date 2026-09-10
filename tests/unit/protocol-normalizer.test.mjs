@@ -13,7 +13,88 @@ import {
   normalizeTurn,
   extractTurnChanges,
 } from "../../src/adapters/supervisor/protocol-normalizer.mjs";
-import { publicProjection } from "../../src/shared/protocol.mjs";
+import { normalizeTerminalStatus, publicProjection } from "../../src/shared/protocol.mjs";
+
+test("status objects require agreement of every explicit field", () => {
+  for (const value of [
+    { type: "completed", status: "failed" },
+    { type: "completed", status: "running" },
+    { type: "completed", status: "unknown" },
+    { type: "completed", status: undefined },
+    { type: "completed", terminalStatus: "failed" },
+    { type: "completed", reason: { type: "completed", status: "failed" } },
+  ]) {
+    assert.equal(normalizeTerminalStatus(value), null, JSON.stringify(value));
+    assert.equal(normalizeTurn({ id: "turn-status-object", status: value }).status, undefined);
+  }
+  assert.equal(normalizeTerminalStatus({ type: "success", status: "completed" }), "completed");
+  assert.equal(normalizeTerminalStatus({ type: "cancelled", status: "interrupted" }), "interrupted");
+});
+
+test("normalizeEvent validates all status object fields at deep raw boundaries", () => {
+  const failures = [];
+  for (const status of ["completed", "failed", "interrupted"]) {
+    for (const other of ["completed", "failed", "interrupted", "unknown", "running"]) {
+      for (const key of ["item", "diff"]) {
+        const event = normalizeEvent({
+          method: `turn/${status}`,
+          threadId: "thread-fields",
+          turnId: "turn-fields",
+          params: {
+            [key]: { turn: { id: "turn-fields", status: { type: status, status: other } } },
+          },
+        });
+        const valid = status === other;
+        if (event.status !== (valid ? status : undefined)
+          || event.verifiedTerminalStatus !== valid) failures.push(`${status}/${key}/${other}`);
+        assert.equal(Object.keys(event).some((key) => key.startsWith("internal")), false);
+        assert.deepEqual(event.internalStatusSources.filter((entry) => (
+          entry.source.startsWith(`params.${key}.turn.status.`)
+        )).map((entry) => entry.source), [
+          `params.${key}.turn.status.type`, `params.${key}.turn.status.status`,
+        ]);
+        assert.equal(Object.isFrozen(event.internalStatusSources), true);
+        assert.equal(event.internalStatusSources.every(Object.isFrozen), true);
+        assert.doesNotMatch(JSON.stringify(publicProjection(event)), /params|turn-fields|internal|verified/);
+      }
+    }
+  }
+  for (const key of ["turn", "turnRecord", "currentTurn"]) {
+    const event = normalizeEvent({
+      method: "turn/completed", threadId: "thread-fields", turnId: "turn-fields",
+      [key]: { id: "turn-fields", type: "failed", status: "completed" },
+    });
+    if (event.status !== undefined) failures.push(`${key}.type`);
+  }
+  assert.deepEqual(failures, []);
+});
+
+test("normalizeEvent preserves deep identity conflicts as hidden evidence", () => {
+  for (const key of ["turnRecord", "currentTurn"]) {
+    const event = normalizeEvent({
+      method: "turn/completed", threadId: "thread-identity", internalTurnId: "turn-identity",
+      params: { item: { turn: { [key]: { id: "other-turn", thread: { id: "other-thread" } } } } },
+    });
+    assert.equal(event.threadId, null);
+    assert.equal(event.internalTurnId, undefined);
+    assert.equal(event.verifiedTerminalStatus, false);
+    assert.equal(event.verifiedTurnIdentity, false);
+    assert.ok(event.internalTurnIdentitySources.some((entry) => entry.value === "other-turn"));
+    assert.doesNotMatch(JSON.stringify(event), /params|other-turn|other-thread|internal|verified/);
+  }
+});
+
+test("normalizeEvent rejects conflicting explicit event discriminators", () => {
+  for (const extras of [
+    { type: "turn.failed" }, { type: "item.completed" }, { type: "unknown" },
+    { params: { method: "turn/failed" } },
+  ]) {
+    const event = normalizeEvent({ method: "turn/completed", threadId: "thread-type",
+      turnId: "turn-type", ...extras });
+    assert.equal(event.status, undefined);
+    assert.equal(event.verifiedTerminalStatus, false);
+  }
+});
 
 test("normalizeEvent returns a bounded public projection without internal ids", () => {
   const event = normalizeEvent({

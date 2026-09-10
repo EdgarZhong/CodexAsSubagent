@@ -84,10 +84,11 @@ export function summarizeChangedFiles(files) {
   };
 }
 
-export function normalizeTerminalStatus(value) {
-  if (isRecord(value)) {
-    return normalizeTerminalStatus(value.type ?? value.status);
-  }
+export const STATUS_EVIDENCE_FIELDS = Object.freeze([
+  'status', 'reason', 'terminalStatus', 'terminal_status', 'executionStatus',
+]);
+
+function statusToken(value) {
   if (typeof value !== 'string') {
     return null;
   }
@@ -101,6 +102,35 @@ export function normalizeTerminalStatus(value) {
   if (status === 'failed' || status === 'error') {
     return 'failed';
   }
+  if (['active', 'queued', 'running', 'waiting'].includes(status)) return status;
+  if (['inprogress', 'in_progress', 'in-progress', 'in progress'].includes(status)) return 'inprogress';
+  if (['waitingonapproval', 'waiting_on_approval', 'waiting-on-approval', 'waiting on approval'].includes(status)) {
+    return 'waitingonapproval';
+  }
+  return null;
+}
+
+// Keep every explicit discriminator: null is invalid evidence, never an absent source.
+export function statusSources(value, source = 'status', seen = new WeakSet()) {
+  if (!isRecord(value)) return [{ source, status: statusToken(value) }];
+  if (seen.has(value)) return [{ source, status: null }];
+  seen.add(value);
+  const fields = ['type', ...STATUS_EVIDENCE_FIELDS].filter((field) => Object.hasOwn(value, field));
+  const sources = fields.length === 0 ? [{ source, status: null }] : fields.flatMap((field) => (
+    statusSources(value[field], `${source}.${field}`, seen)
+  ));
+  seen.delete(value);
+  return sources;
+}
+
+export function normalizeStatus(value) {
+  const sources = statusSources(value);
+  const status = sources[0].status;
+  return status !== null && sources.every((entry) => entry.status === status) ? status : null;
+}
+
+export function normalizeTerminalStatus(value) {
+  const status = normalizeStatus(value);
   return TERMINAL_STATUSES.includes(status) ? status : null;
 }
 

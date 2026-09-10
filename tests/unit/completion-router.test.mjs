@@ -24,6 +24,148 @@ async function setup(t) {
   return { store, executions, completions, router };
 }
 
+test('CompletionRouter rejects conflicting evidence before any durable mutation', async (t) => {
+  const { store, executions, router } = await setup(t);
+  const cases = [];
+  for (const other of ['failed', 'running', 'unknown', undefined]) {
+    const status = { type: 'completed', status: other };
+    cases.push([`event.status/${other}`, { status }]);
+    for (const key of ['item', 'diff']) {
+      cases.push([`params.${key}/${other}`, { params: { [key]: { turn: { status } } } }]);
+    }
+    cases.push([`hidden.status/${other}`, {
+      verifiedTerminalStatus: true,
+      internalStatusSources: [{ source: 'test.status', status }],
+    }]);
+    for (const key of ['turn', 'turnRecord', 'currentTurn']) {
+      cases.push([`result.${key}/${other}`, { result: { status: 'completed', [key]: { status } } }]);
+    }
+    if (other !== 'running') cases.push([`execution.status/${other}`, {}, { status: { type: 'running', status: other } }]);
+  }
+  for (const key of ['turn', 'turnRecord', 'currentTurn']) {
+    cases.push([`event.${key}.type`, { [key]: { type: 'failed', status: 'completed' } }]);
+    cases.push([`event.${key}.id`, { [key]: { id: 'other-turn' } }]);
+    cases.push([`result.${key}.thread`, { result: { status: 'completed', [key]: { thread: { id: 'other-thread' } } } }]);
+    cases.push([`execution.${key}.id`, {}, { [key]: { id: 'other-turn' } }]);
+    cases.push([`execution.${key}.thread`, {}, { [key]: { thread: { id: 'other-thread' } } }]);
+  }
+  cases.push(
+    ['conflicting method', { method: 'turn/failed' }],
+    ['conflicting params method', { params: { method: 'item/completed' } }],
+    ['undefined hidden status', { internalStatusSources: undefined }],
+    ['execution.active disagreement', {}, { status: 'running', currentTurn: { status: 'queued' } }],
+    ['hidden result identity', { result: { status: 'completed', verifiedTurnIdentity: true,
+      internalTurnIdentitySources: [{ source: 'result.turn.id', value: 'other-turn' }] } }],
+    ['hidden execution identity', {}, { verifiedThreadIdentity: true,
+      internalThreadIdentitySources: [{ source: 'execution.thread.id', value: 'other-thread' }] }],
+    ['hidden result status', { result: { status: 'completed', verifiedTerminalStatus: true,
+      internalStatusSources: [{ source: 'result.status', status: 'failed' }] } }],
+    ['deep params thread', { params: { diff: { turn: { thread: { id: 'other-thread' } } } } }],
+    ['failed diff completed', { type: 'turn.failed', status: 'failed', params: { diff: { turn: { status: 'completed' } } } }],
+    ['hidden event thread', { verifiedThreadIdentity: true,
+      internalThreadIdentitySources: [{ source: 'event.thread.id', value: 'other-thread' }] }],
+    ['hidden event turn', { verifiedTurnIdentity: true,
+      internalTurnIdentitySources: [{ source: 'event.turn.id', value: 'other-turn' }] }],
+    ['hidden execution status', {}, { verifiedTerminalStatus: true,
+      internalStatusSources: [{ source: 'execution.status', status: { type: 'running', status: 'failed' } }] }],
+    ['two supplied results', { result: { status: 'completed' }, terminalResult: {
+      threadId: 'other-thread', status: 'completed', changes: { files: [] },
+    } }],
+  );
+  const getExecution = router.executions.getExecution.bind(router.executions);
+  let executionExtras = {};
+  router.executions.getExecution = (...args) => {
+    const execution = getExecution(...args);
+    return execution ? { ...execution, ...executionExtras } : null;
+  };
+  const failures = [];
+  for (const [index, [name, extras, activeExtras = {}]] of cases.entries()) {
+    const threadId = `thread-evidence-${index}`;
+    const turnId = `turn-evidence-${index}`;
+    executionExtras = activeExtras;
+    executions.createExecution({ threadId, turnId,
+      workspace: '/workspace/evidence', ownerInstanceId: 'router-instance' });
+    const before = getExecution(threadId);
+    const event = { type: 'turn.completed', status: 'completed', threadId, internalTurnId: turnId, ...extras };
+    if (event.result) event.result = { threadId, turnId, changes: { files: [] }, ...event.result };
+    if (router.onTerminal(event) !== null
+      || JSON.stringify(getExecution(threadId)) !== JSON.stringify(before)
+      || store.db.prepare('SELECT COUNT(*) AS count FROM completions WHERE thread_id = ?').get(threadId).count !== 0) {
+      failures.push(name);
+    }
+  }
+  assert.deepEqual(failures, []);
+});
+
+test('CompletionRouter validates TerminalResult instance evidence before toJSON projection', async (t) => {
+  const { executions, store, router } = await setup(t);
+  const failures = [];
+  for (const [index, extras] of [
+    { turn: { thread: { id: 'other-thread' } } },
+    { turnRecord: { id: 'other-turn' } },
+    { currentTurn: { status: { type: 'completed', status: 'failed' } } },
+  ].entries()) {
+    const threadId = `thread-instance-${index}`;
+    const turnId = `turn-instance-${index}`;
+    executions.createExecution({ threadId, turnId, workspace: '/workspace/instance', ownerInstanceId: 'router-instance' });
+    const terminalResult = Object.assign(new TerminalResult({ threadId, status: 'completed' }), extras);
+    if (router.onTerminal({ type: 'turn.completed', threadId, turnId, terminalResult }) !== null
+      || executions.getExecution(threadId) === null) failures.push(index);
+  }
+  assert.deepEqual(failures, []);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+});
+
+test('CompletionRouter requires retained turn identity and accepts consistent terminal evidence', async (t) => {
+  const { executions, store, router } = await setup(t);
+  const getExecution = router.executions.getExecution.bind(router.executions);
+  router.executions.getExecution = (...args) => {
+    const execution = getExecution(...args);
+    return execution ? { ...execution, status: { type: 'running', status: 'running' },
+      currentTurn: { id: execution.turnId, thread: { id: execution.threadId }, status: 'running' } } : null;
+  };
+  for (const status of ['completed', 'failed', 'interrupted']) {
+    const threadId = `thread-consistent-${status}`;
+    const turnId = `turn-consistent-${status}`;
+    executions.createExecution({ threadId, turnId, workspace: '/workspace/consistent', ownerInstanceId: 'router-instance' });
+    const raw = { method: `turn/${status}`, threadId, turnId, params: {
+      item: { type: 'agentMessage', turn: { id: turnId, status: { type: status, status } } },
+      diff: { turn: { id: turnId, thread: { id: threadId }, status } },
+      currentTurn: { id: turnId, status },
+    } };
+    const normalized = normalizeEvent(raw);
+    const before = getExecution(threadId);
+    // Public serialization loses the private turn evidence, even with a supplied result.
+    assert.equal(router.onTerminal({ ...JSON.parse(JSON.stringify(normalized)),
+      result: { threadId, turnId, status, changes: { files: [] } } }), null);
+    assert.deepEqual(getExecution(threadId), before);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions WHERE thread_id = ?').get(threadId).count, 0);
+    const completion = router.onTerminal(normalized);
+    assert.equal(completion.payload.status, status);
+    assert.equal(getExecution(threadId), null);
+    assert.doesNotMatch(JSON.stringify(completion.payload), /turnId|params|internal|verified/);
+  }
+});
+
+test('CompletionRouter gates orphan canonical and recovery results on type and verification', async (t) => {
+  const { store, router } = await setup(t);
+  for (const provenance of ['canonical', 'recovery']) {
+    const threadId = `thread-orphan-${provenance}`;
+    const turnId = `turn-orphan-${provenance}`;
+    const terminalResult = new TerminalResult({ threadId, status: 'completed' });
+    const event = { provenance, verifiedTerminal: true, threadId, turnId,
+      workspace: '/workspace/orphan', terminalResult,
+      type: provenance === 'canonical' ? 'turn.completed' : 'recovery.terminal' };
+    for (const extras of [
+      { verifiedTerminal: false }, { type: 'error' }, { type: 'item.completed' },
+      { currentTurn: { status: { type: 'completed', status: 'failed' } } },
+      { turnRecord: { id: 'other-turn' } },
+    ]) assert.equal(router.onTerminal({ ...event, ...extras }), null);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions WHERE thread_id = ?').get(threadId).count, 0);
+    assert.equal(router.onTerminal(event).payload.status, 'completed');
+  }
+});
+
 test('CompletionRouter persists terminal result first and ignores non-terminal events', async (t) => {
   const { store, executions, completions, router } = await setup(t);
   const workspace = '/workspace/router';
