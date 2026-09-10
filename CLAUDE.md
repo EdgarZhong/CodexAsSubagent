@@ -19,7 +19,7 @@
 - [ ] 注册并实现十个 MCP 工具的稳定 schema 与 compact response projection。
 - [ ] 实现 Hook drain、lease 恢复和 Host wrapper；补齐 ZCode 插件配置。
 - [ ] 完成 unit/integration/smoke 回归、独立 Review 和用户级验收记录。
-- [ ] 自主执行 git commit；不执行 push、发布或跨工作区合并。
+- [x] 自主执行 git commit；不执行 push、发布或跨工作区合并。
 
 ## 当前动态决策
 

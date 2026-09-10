@@ -18,7 +18,7 @@ test('project layout exposes the V1 foundation', async () => {
   assert.equal(packageJson.type, 'module');
   assert.equal(packageJson.scripts.test, "node --test 'tests/**/*.test.mjs'");
   assert.equal(packageJson.scripts.lint, 'node --check src/cli/main.mjs');
-  assert.equal(packageJson.scripts.smoke, 'node src/cli/main.mjs --help');
+  assert.equal(packageJson.scripts.smoke, './src/cli/main.mjs --help');
   assert.equal(packageJson.bin?.['codex-as-subagent'], 'src/cli/main.mjs');
   assert.equal(DEFAULT_MODEL, 'gpt-5.6-luna');
   assert.equal(DEFAULT_EFFORT, 'xhigh');

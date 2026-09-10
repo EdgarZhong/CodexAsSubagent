@@ -13,6 +13,6 @@
   "scripts": {
     "test": "node --test 'tests/**/*.test.mjs'",
     "lint": "node --check src/cli/main.mjs",
-    "smoke": "node src/cli/main.mjs --help"
+    "smoke": "./src/cli/main.mjs --help"
   }
 }
