@@ -1,0 +1,3 @@
+[submodule "vendor/codex-supervisor-mcp"]
+	path = vendor/codex-supervisor-mcp
+	url = https://github.com/redmikarimo/codex-supervisor-mcp.git

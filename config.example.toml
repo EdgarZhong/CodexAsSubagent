@@ -1,0 +1,5 @@
+# Codex As Subagent 本地运行配置示例。
+# 实际运行目录默认位于 ~/.codex-as-subagent/。
+model = "gpt-5.6-luna"
+effort = "xhigh"
+data_dir = "~/.codex-as-subagent"

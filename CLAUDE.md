@@ -3,16 +3,16 @@
 ## 当前阶段
 
 - 目标：按 docs/Codex As Subagent — 详细设计与编码规格.md 自主交付尽可能完整的 V1，并形成可运行、可测试、可继续演进的 Git 仓库。
-- 阶段：本轮自主实施已启动；先完成核心文档与执行计划，再实现 Runtime、MCP、Hook、生命周期和插件。
-- 基线：2026-09-11，目录原先只有详细设计文档，尚未初始化 Git、尚无源码、package manifest 或 Submodule。
+- 阶段：Task 1 仓库基础已完成；后续继续实现 Runtime、MCP、Hook、生命周期和插件。
+- 基线：2026-09-11，已完成 Git 分支、package manifest、CLI/共享常量、源码与测试目录骨架及 pinned Submodule。
 - 默认裁决：使用 Node.js ESM 与内置 node:sqlite；以 fake/in-memory Supervisor Adapter 支撑确定性单元测试，同时保留真实上游 Adapter 接口。
 
 ## 任务看板
 
 - [x] 通读详细设计，提取 V1 固定契约、目录结构、关键测试和核心不变量。
 - [x] 创建 README.md、AGENTS.md、CLAUDE.md，明确三者职责。
-- [ ] 初始化 Git 分支与 .gitignore，固定上游 codex-supervisor-mcp Submodule。
-- [ ] 建立 package/CLI/源码目录和共享协议常量。
+- [x] 初始化 Git 分支与 .gitignore，固定上游 codex-supervisor-mcp Submodule。
+- [x] 建立 package/CLI/源码目录和共享协议常量。
 - [ ] 实现 Supervisor Adapter、WorkspaceGuard、SQLite StateStore。
 - [ ] 实现 RuntimeManager、TerminalResult、CompletionRouter 与双消费者 delivery。
 - [ ] 实现 Unix Socket Runtime Server、stdio Bootstrap、lazy start、startup lock、idle shutdown 与 recovery。
