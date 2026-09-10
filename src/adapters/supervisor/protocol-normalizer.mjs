@@ -1,8 +1,8 @@
 import {
-  capChangedFiles,
   isRecord,
   normalizeTerminalStatus,
   safeError,
+  summarizeChangedFiles,
   truncateAssistantMessage,
 } from '../../shared/protocol.mjs';
 
@@ -30,9 +30,8 @@ function extractTurnId(event) {
   const params = eventParams(event);
   return firstString(
     event?.turnId,
-    event?.turn?.id,
+    event?.internalTurnId,
     params.turnId,
-    params.turn?.id,
     params.item?.turnId,
   );
 }
@@ -41,49 +40,162 @@ function currentTurnRecord(event) {
   if (!isRecord(event)) {
     return null;
   }
+  const params = eventParams(event);
   return isRecord(event.turn)
     ? event.turn
     : isRecord(event.turnRecord)
       ? event.turnRecord
       : isRecord(event.currentTurn)
         ? event.currentTurn
-        : null;
+        : isRecord(params.turn)
+          ? params.turn
+          : null;
+}
+
+function turnId(turn) {
+  return firstString(turn?.id, turn?.turnId);
+}
+
+function scopedTurn(event) {
+  const eventTurnId = extractTurnId(event);
+  if (!eventTurnId) {
+    return null;
+  }
+
+  const turn = currentTurnRecord(event);
+  const recordTurnId = turnId(turn);
+  if (recordTurnId && recordTurnId !== eventTurnId) {
+    return null;
+  }
+
+  const params = eventParams(event);
+  const diffTurnId = firstString(params.diff?.turnId, params.diff?.turn?.id);
+  const itemTurnId = firstString(params.item?.turnId, params.item?.turn?.id);
+  if ((diffTurnId && diffTurnId !== eventTurnId) || (itemTurnId && itemTurnId !== eventTurnId)) {
+    return null;
+  }
+  return { eventTurnId, turn };
+}
+
+function itemFileChanges(item) {
+  if (!isRecord(item)) {
+    return [];
+  }
+  const itemType = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+  if (!itemType.includes('filechange') && !itemType.includes('file_change')) {
+    return [];
+  }
+  if (Array.isArray(item.fileChanges)) return item.fileChanges;
+  if (Array.isArray(item.changes)) return item.changes;
+  if (isRecord(item.changes) && Array.isArray(item.changes.files)) return item.changes.files;
+  if (typeof item.path === 'string') return [{ path: item.path, kind: item.kind ?? item.operation }];
+  return [];
 }
 
 function fileChangesFromTurn(turn) {
   if (!isRecord(turn)) {
     return [];
   }
-  if (Array.isArray(turn.fileChanges)) {
-    return turn.fileChanges;
+  const files = [];
+  if (Array.isArray(turn.fileChanges)) files.push(...turn.fileChanges);
+  if (isRecord(turn.changes)) {
+    if (Array.isArray(turn.changes.files)) files.push(...turn.changes.files);
+    if (Array.isArray(turn.changes.fileChanges)) files.push(...turn.changes.fileChanges);
   }
-  if (isRecord(turn.changes) && Array.isArray(turn.changes.files)) {
-    return turn.changes.files;
+  if (Array.isArray(turn.changes)) files.push(...turn.changes);
+  if (Array.isArray(turn.items)) {
+    for (const item of turn.items) files.push(...itemFileChanges(item));
   }
-  if (Array.isArray(turn.changes)) {
-    return turn.changes;
+  return files;
+}
+
+function fileChangesFromParams(params) {
+  const files = [];
+  if (isRecord(params.diff)) {
+    if (Array.isArray(params.diff.files)) files.push(...params.diff.files);
+    if (Array.isArray(params.diff.fileChanges)) files.push(...params.diff.fileChanges);
+    if (isRecord(params.diff.changes) && Array.isArray(params.diff.changes.files)) {
+      files.push(...params.diff.changes.files);
+    }
   }
-  return [];
+  if (Array.isArray(params.fileChanges)) files.push(...params.fileChanges);
+  files.push(...itemFileChanges(params.item));
+  return files;
 }
 
 export function extractTurnChanges(event) {
-  const turn = currentTurnRecord(event);
-  if (!turn) {
-    return { files: [] };
+  const scoped = scopedTurn(event);
+  if (!scoped) {
+    return summarizeChangedFiles([]);
   }
+  return summarizeChangedFiles([
+    ...fileChangesFromTurn(scoped.turn),
+    ...fileChangesFromParams(eventParams(event)),
+  ]);
+}
 
-  const eventTurnId = extractTurnId(event);
-  const turnId = firstString(turn.id, turn.turnId);
-  if (eventTurnId && turnId && eventTurnId !== turnId) {
-    return { files: [] };
+function itemAssistantText(item) {
+  if (!isRecord(item)) {
+    return null;
   }
-  return { files: capChangedFiles(fileChangesFromTurn(turn)) };
+  const type = typeof item.type === 'string' ? item.type.toLowerCase() : '';
+  if (!type.includes('agentmessage') && !type.includes('agent_message')) {
+    return null;
+  }
+  if (typeof item.text === 'string' && item.text.length > 0) return item.text;
+  if (typeof item.message === 'string' && item.message.length > 0) return item.message;
+  if (Array.isArray(item.content)) {
+    const text = item.content
+      .map((part) => (typeof part?.text === 'string' ? part.text : ''))
+      .join('');
+    if (text.length > 0) return text;
+  }
+  return null;
+}
+
+export function extractAssistantMessage(turn) {
+  if (!isRecord(turn)) {
+    return null;
+  }
+  const direct = firstString(
+    turn.finalAssistantMessage,
+    turn.lastAssistantMessage,
+    turn.assistantMessage,
+    turn.text,
+    turn.message,
+  );
+  if (direct) return direct;
+  if (Array.isArray(turn.items)) {
+    for (const item of [...turn.items].reverse()) {
+      const text = itemAssistantText(item);
+      if (text) return text;
+    }
+  }
+  return null;
+}
+
+function isProcessFailure(event, normalizedMethod = '') {
+  const params = eventParams(event);
+  const source = event?.source ?? event?.error?.source ?? params.error?.source;
+  return (
+    normalizedMethod === 'process.failure'
+    || normalizedMethod === 'supervisor.process.failure'
+    || normalizedMethod === 'supervisor.process.failed'
+    || event?.type === 'process_failure'
+    || (event?.kind === 'lifecycle' && source === 'app-server-process')
+  );
 }
 
 function eventType(event) {
-  const method = firstString(event?.method, event?.type, eventParams(event).method) ?? 'unknown';
+  const params = eventParams(event);
+  const method = firstString(event?.method, event?.type, params.method) ?? 'unknown';
   const normalized = method.replaceAll('/', '.');
+  if (isProcessFailure(event, normalized)) return 'supervisor.process.failed';
   if (normalized === 'turn.completed' || normalized === 'turn.complete') return 'turn.completed';
+  if (normalized === 'turn.failed' || normalized === 'turn.error') return 'turn.failed';
+  if (normalized === 'turn.interrupted' || normalized === 'turn.cancelled' || normalized === 'turn.canceled') {
+    return 'turn.interrupted';
+  }
   if (normalized === 'turn.started' || normalized === 'turn.start') return 'turn.started';
   if (normalized === 'item.agentMessage.delta') return 'assistant.delta';
   if (normalized === 'item.completed') return 'item.completed';
@@ -93,38 +205,33 @@ function eventType(event) {
   return normalized;
 }
 
-function assistantText(event, type) {
-  const params = eventParams(event);
-  const value = firstString(
-    event?.assistantMessage,
-    event?.text,
-    event?.delta,
-    event?.message,
-    event?.turn?.assistantMessage,
-    event?.turn?.text,
-    event?.turn?.message,
-    params.assistantMessage,
-    params.text,
-    params.delta,
-    params.item?.text,
-  );
-  if (!value) {
-    return null;
+function terminalStatus(event, type) {
+  if (type === 'supervisor.process.failed') {
+    return 'failed';
   }
-  return type === 'assistant.delta' ? value : truncateAssistantMessage(value);
+  if (type === 'turn.failed') return 'failed';
+  if (type === 'turn.interrupted') return 'interrupted';
+  if (type !== 'turn.completed') return null;
+  const params = eventParams(event);
+  return normalizeTerminalStatus(
+    event?.status
+      ?? event?.turn?.status
+      ?? params.status
+      ?? params.turn?.status,
+  ) ?? 'completed';
 }
 
-function eventStatus(event, type) {
+function assistantText(event, type) {
   const params = eventParams(event);
-  const direct = normalizeTerminalStatus(
-    firstString(event?.status, event?.turn?.status, params.status, params.turn?.status),
-  );
-  if (direct) {
-    return direct;
+  if (type === 'assistant.delta') {
+    return firstString(event?.delta, params.delta);
   }
-  if (type === 'turn.completed') return 'completed';
-  if (type === 'error') return 'failed';
-  return null;
+  const direct = firstString(event?.assistantMessage, event?.text, event?.turn?.assistantMessage);
+  if (direct) return direct;
+  const turn = currentTurnRecord(event);
+  const fromTurn = extractAssistantMessage(turn);
+  if (fromTurn) return fromTurn;
+  return itemAssistantText(params.item);
 }
 
 export function normalizeEvent(event) {
@@ -133,20 +240,19 @@ export function normalizeEvent(event) {
     type,
     threadId: extractThreadId(event),
   };
-  const status = eventStatus(event, type);
-  if (status) {
-    normalized.status = status;
-  }
+  const status = terminalStatus(event, type);
+  if (status) normalized.status = status;
   const message = assistantText(event, type);
-  if (message !== null) {
-    normalized.assistantMessage = message;
-  }
-  if (type === 'turn.completed' || type === 'turn.diff.updated') {
+  if (message !== null) normalized.assistantMessage = truncateAssistantMessage(message);
+  if (type === 'turn.completed' || type === 'turn.failed' || type === 'turn.interrupted' || type === 'turn.diff.updated') {
     normalized.changes = extractTurnChanges(event);
   }
-  if (type === 'error') {
+  if (type === 'error' || type === 'supervisor.process.failed') {
     const params = eventParams(event);
-    normalized.error = safeError(event?.error ?? params.error ?? event?.message ?? params.message);
+    const error = event?.error ?? params.error ?? event?.message ?? params.message;
+    normalized.error = type === 'supervisor.process.failed'
+      ? { code: 'app_server_crash', message: 'Codex app-server process failed.' }
+      : safeError(error);
   }
   return normalized;
 }
@@ -155,11 +261,18 @@ export function normalizeTurn(turn) {
   if (!isRecord(turn)) {
     return null;
   }
+  const rawStatus = turn.status?.type ?? turn.status;
+  const status = typeof rawStatus === 'string' ? normalizeTerminalStatus(rawStatus) ?? rawStatus : null;
+  const message = extractAssistantMessage(turn);
   const result = {};
-  if (typeof turn.id === 'string') result.id = turn.id;
-  if (typeof turn.status === 'string') result.status = normalizeTerminalStatus(turn.status) ?? turn.status;
-  const message = firstString(turn.assistantMessage, turn.text, turn.message);
-  if (message !== null) result.assistantMessage = truncateAssistantMessage(message);
-  result.changes = { files: capChangedFiles(fileChangesFromTurn(turn)) };
+  if (status) result.status = status;
+  if (message) {
+    const key = status === 'completed' ? 'finalAssistantMessage' : 'lastAssistantMessage';
+    result[key] = truncateAssistantMessage(message);
+  }
+  const id = turnId(turn);
+  result.changes = id
+    ? extractTurnChanges({ turnId: id, turn })
+    : summarizeChangedFiles([]);
   return result;
 }

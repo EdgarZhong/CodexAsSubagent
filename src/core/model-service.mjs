@@ -12,6 +12,11 @@ function stringValue(...values) {
   return values.find((value) => typeof value === 'string' && value.length > 0) ?? null;
 }
 
+function configObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value.effectiveConfig ?? value.config ?? value;
+}
+
 function effortList(entry) {
   const value = entry?.supportedReasoningEfforts
     ?? entry?.supportedEfforts
@@ -77,8 +82,16 @@ export class ModelService {
     }
 
     const models = await this.#availableModels();
-    const config = await this.#config();
-    const selectedModel = model ?? DEFAULT_MODEL;
+    const config = configObject(await this.#config());
+    const configuredModel = stringValue(config.model, config.defaultModel, config.default_model);
+    const selectedModel = model ?? configuredModel ?? DEFAULT_MODEL;
+
+    if (models.length === 0) {
+      if (model === undefined) {
+        throw new DefaultModelUnavailableError('No verifiable model catalog is available for the default spawn.');
+      }
+      throw new InvalidModelError(`Model ${model} is not verifiably available on this supervisor.`);
+    }
     const entry = models.find((candidate) => candidate.id === selectedModel);
 
     if (model === undefined && models.length > 0 && !entry) {
@@ -91,8 +104,14 @@ export class ModelService {
     }
 
     const availableEfforts = entry?.efforts ?? [];
-    const configuredEffort = stringValue(config?.effort, config?.defaultEffort);
-    let selectedEffort = effort ?? (model === undefined ? DEFAULT_EFFORT : null);
+    const configuredEffort = stringValue(
+      config.model_reasoning_effort,
+      config.modelReasoningEffort,
+      config.effort,
+      config.defaultEffort,
+      config.default_effort,
+    );
+    let selectedEffort = effort ?? (model === undefined ? configuredEffort ?? DEFAULT_EFFORT : null);
     if (selectedEffort === null) {
       selectedEffort = stringValue(entry?.defaultEffort, configuredEffort, DEFAULT_EFFORT);
       if (availableEfforts.length > 0 && !availableEfforts.includes(selectedEffort)) {

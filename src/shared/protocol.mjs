@@ -13,6 +13,20 @@ export {
 export const MAX_FILES = MAX_CHANGED_FILES;
 export const MAX_ASSISTANT_CHARS = MAX_ASSISTANT_MESSAGE_CHARS;
 
+const INTERNAL_PROJECTION_KEYS = new Set([
+  'approval',
+  'cursor',
+  'eventCursor',
+  'params',
+  'raw',
+  'receivedAt',
+  'request',
+  'requestId',
+  'requestKey',
+  'sequence',
+  'turnId',
+]);
+
 export function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
@@ -41,11 +55,15 @@ function normalizeFile(file) {
 }
 
 export function capChangedFiles(files) {
+  return summarizeChangedFiles(files).files;
+}
+
+export function summarizeChangedFiles(files) {
   if (!Array.isArray(files)) {
-    return [];
+    return { files: [], filesChanged: 0, filesTruncated: false };
   }
 
-  const result = [];
+  const allFiles = [];
   const seen = new Set();
   for (const file of files) {
     const normalized = normalizeFile(file);
@@ -57,12 +75,13 @@ export function capChangedFiles(files) {
       continue;
     }
     seen.add(key);
-    result.push(normalized);
-    if (result.length >= MAX_CHANGED_FILES) {
-      break;
-    }
+    allFiles.push(normalized);
   }
-  return result;
+  return {
+    files: allFiles.slice(0, MAX_CHANGED_FILES),
+    filesChanged: allFiles.length,
+    filesTruncated: allFiles.length > MAX_CHANGED_FILES,
+  };
 }
 
 export function normalizeTerminalStatus(value) {
@@ -72,12 +91,7 @@ export function normalizeTerminalStatus(value) {
   if (typeof value !== 'string') {
     return null;
   }
-  const status = value.toLowerCase().replaceAll('/', '.');
-  if (status.endsWith('.completed') || status.endsWith('.complete')) return 'completed';
-  if (status.endsWith('.interrupted') || status.endsWith('.cancelled') || status.endsWith('.canceled')) {
-    return 'interrupted';
-  }
-  if (status.endsWith('.failed') || status.endsWith('.error')) return 'failed';
+  const status = value.toLowerCase().trim();
   if (status === 'completed' || status === 'complete' || status === 'success') {
     return 'completed';
   }
@@ -114,15 +128,31 @@ export function safeError(error) {
 }
 
 export function publicProjection(value) {
-  if (!isRecord(value)) {
+  const seen = new WeakSet();
+  const project = (entry) => {
+    if (Array.isArray(entry)) {
+      return entry.map(project);
+    }
+    if (!isRecord(entry)) {
+      return entry;
+    }
+    if (seen.has(entry)) {
+      return undefined;
+    }
+    seen.add(entry);
+    const result = {};
+    for (const [key, child] of Object.entries(entry)) {
+      if (INTERNAL_PROJECTION_KEYS.has(key)) {
+        continue;
+      }
+      result[key] = project(child);
+    }
+    seen.delete(entry);
+    return result;
+  };
+
+  if (!isRecord(value) && !Array.isArray(value)) {
     return value;
   }
-  const result = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === 'turnId' || key === 'eventCursor' || key === 'cursor' || key === 'raw') {
-      continue;
-    }
-    result[key] = entry;
-  }
-  return result;
+  return project(value);
 }

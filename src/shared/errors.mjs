@@ -3,6 +3,7 @@ export const ERROR_CODES = Object.freeze({
   HISTORY_UNAVAILABLE: 'history_unavailable',
   INVALID_EFFORT: 'invalid_effort',
   INVALID_MODEL: 'invalid_model',
+  INVALID_TERMINAL_RESULT: 'invalid_terminal_result',
   INVALID_TERMINAL_STATUS: 'invalid_terminal_status',
   NO_ACTIVE_TURN: 'no_active_turn',
   SUPERVISOR_UNAVAILABLE: 'supervisor_unavailable',
@@ -56,6 +57,12 @@ export class DefaultModelUnavailableError extends DomainError {
 export class InvalidTerminalStatusError extends DomainError {
   constructor(message = 'Terminal result has an unsupported status.') {
     super(ERROR_CODES.INVALID_TERMINAL_STATUS, message);
+  }
+}
+
+export class InvalidTerminalResultError extends DomainError {
+  constructor(message = 'Terminal result requires a non-empty thread id.') {
+    super(ERROR_CODES.INVALID_TERMINAL_RESULT, message);
   }
 }
 

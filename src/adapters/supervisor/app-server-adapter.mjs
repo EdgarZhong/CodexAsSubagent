@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 
 import { AppServerClient } from '../../../vendor/codex-supervisor-mcp/src/app-server-client.mjs';
 import { EventStore } from '../../../vendor/codex-supervisor-mcp/src/event-store.mjs';
+import { normalizeEvent } from './protocol-normalizer.mjs';
 
 export const SUPERVISOR_ADAPTER_METHODS = Object.freeze([
   'startThread',
@@ -27,6 +28,10 @@ function workspaceOf(input = {}) {
   return input.workspace ?? input.cwd;
 }
 
+function emitSafeRuntimeEvent(emitter, event) {
+  emitter.emit('event', normalizeEvent(event));
+}
+
 class BridgedEventStore extends EventStore {
   constructor(emitter, options) {
     super(options);
@@ -35,13 +40,16 @@ class BridgedEventStore extends EventStore {
 
   record(...args) {
     const event = super.record(...args);
-    this.emitter.emit('event', event);
+    emitSafeRuntimeEvent(this.emitter, event);
     return event;
   }
 
   recordProcessFailure(...args) {
     const affected = super.recordProcessFailure(...args);
-    this.emitter.emit('process_failure', { affectedThreads: affected });
+    emitSafeRuntimeEvent(this.emitter, {
+      type: 'process_failure',
+      affectedThreads: Number.isInteger(affected) && affected >= 0 ? affected : 0,
+    });
     return affected;
   }
 }
@@ -53,7 +61,7 @@ function bridgeSuppliedEventStore(eventStore, emitter) {
   const originalRecord = eventStore.record.bind(eventStore);
   eventStore.record = (...args) => {
     const event = originalRecord(...args);
-    emitter.emit('event', event);
+    emitSafeRuntimeEvent(emitter, event);
     return event;
   };
   Object.defineProperty(eventStore, '__codexAsSubagentBridged', {
@@ -76,6 +84,15 @@ export function assertSupervisorAdapter(adapter) {
 }
 
 export function createFakeSupervisorAdapter(implementation = {}) {
+  if (implementation === null || typeof implementation !== 'object' || Array.isArray(implementation)) {
+    throw new TypeError('Fake supervisor adapter implementation must be an object.');
+  }
+  for (const [method, value] of Object.entries(implementation)) {
+    if (!SUPERVISOR_ADAPTER_METHODS.includes(method)) {
+      throw new TypeError(`Unknown supervisor adapter method ${method}.`);
+    }
+    assertFunction(value, method);
+  }
   const unsupported = (method) => async () => {
     throw new Error(`Fake supervisor adapter method ${method} is not configured.`);
   };
@@ -83,7 +100,7 @@ export function createFakeSupervisorAdapter(implementation = {}) {
   for (const method of SUPERVISOR_ADAPTER_METHODS) {
     adapter[method] = implementation[method] ?? unsupported(method);
   }
-  return adapter;
+  return assertSupervisorAdapter(adapter);
 }
 
 export function createSupervisorAdapter(options = {}) {
@@ -101,13 +118,13 @@ export function createSupervisorAdapter(options = {}) {
   });
 
   if (suppliedEventStore?.on) {
-    const eventHandler = (event) => runtimeEvents.emit('event', event);
+    const eventHandler = (event) => emitSafeRuntimeEvent(runtimeEvents, event);
     suppliedEventStore.on('event', eventHandler);
   } else if (suppliedEventStore) {
     bridgeSuppliedEventStore(suppliedEventStore, runtimeEvents);
   }
   if (typeof options.subscribeRuntimeEvents === 'function') {
-    options.subscribeRuntimeEvents((event) => runtimeEvents.emit('event', event));
+    options.subscribeRuntimeEvents((event) => emitSafeRuntimeEvent(runtimeEvents, event));
   }
 
   const request = async (method, params) => await client.request(method, params);
@@ -182,21 +199,19 @@ export function createSupervisorAdapter(options = {}) {
       };
     },
 
-    async readThreadMetadata(threadId, optionsForRead = {}) {
+    async readThreadMetadata(threadId) {
       const result = await request('thread/read', {
         threadId,
         includeTurns: false,
-        ...optionsForRead,
       });
       return result?.thread ?? null;
     },
 
     async readRecentTurns(threadId, optionsForRead = {}) {
-      const { turnId, ...requestOptions } = optionsForRead;
+      const { turnId } = optionsForRead;
       const result = await request('thread/read', {
         threadId,
         includeTurns: true,
-        ...requestOptions,
       });
       const turns = result?.thread?.turns ?? result?.turns ?? [];
       return {

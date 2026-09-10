@@ -1,34 +1,86 @@
-import { randomUUID } from 'node:crypto';
-
-import { MAX_CHANGED_FILES } from '../shared/constants.mjs';
-import { InvalidTerminalStatusError } from '../shared/errors.mjs';
 import {
-  capChangedFiles,
+  InvalidTerminalResultError,
+  InvalidTerminalStatusError,
+} from '../shared/errors.mjs';
+import {
   normalizeTerminalStatus,
   safeError,
+  summarizeChangedFiles,
   truncateAssistantMessage,
 } from '../shared/protocol.mjs';
+import {
+  extractAssistantMessage,
+  extractTurnChanges,
+} from '../adapters/supervisor/protocol-normalizer.mjs';
 
 function firstString(...values) {
   return values.find((value) => typeof value === 'string') ?? '';
 }
 
-function terminalChanges(input) {
-  if (Array.isArray(input?.changes?.files)) return capChangedFiles(input.changes.files);
-  if (Array.isArray(input?.fileChanges)) return capChangedFiles(input.fileChanges);
-  if (Array.isArray(input?.turn?.fileChanges)) return capChangedFiles(input.turn.fileChanges);
-  if (Array.isArray(input?.turn?.changes?.files)) return capChangedFiles(input.turn.changes.files);
-  return [];
+function turnRecord(input) {
+  return input?.turn ?? input?.turnRecord ?? input?.currentTurn ?? null;
 }
 
-function optionalString(result, key, ...values) {
-  const value = firstString(...values);
-  if (value) result[key] = value;
+function terminalChanges(input) {
+  const turn = turnRecord(input);
+  const turnId = firstString(input?.turnId, input?.internalTurnId);
+  const recordId = firstString(turn?.id, turn?.turnId);
+  if (!turn || !turnId || !recordId || turnId !== recordId) {
+    return summarizeChangedFiles([]);
+  }
+
+  const extracted = extractTurnChanges({ ...input, turn, turnId });
+  const explicit = input?.turnChanges;
+  if (
+    explicit
+    && typeof explicit === 'object'
+    && explicit.turnId === turnId
+    && Array.isArray(explicit.files)
+  ) {
+    return summarizeChangedFiles([...extracted.files, ...explicit.files]);
+  }
+  return extracted;
+}
+
+function canonicalChanges(value) {
+  const files = Array.isArray(value?.files) ? value.files : [];
+  const bounded = summarizeChangedFiles(files);
+  const filesChanged = Number.isInteger(value?.filesChanged) && value.filesChanged >= bounded.files.length
+    ? value.filesChanged
+    : bounded.filesChanged;
+  return {
+    files: bounded.files,
+    filesChanged,
+    filesTruncated: Boolean(value?.filesTruncated) || filesChanged > bounded.files.length,
+  };
 }
 
 export class TerminalResult {
-  constructor(data) {
-    this.data = Object.freeze({ ...data });
+  #data;
+
+  constructor(data = {}) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new InvalidTerminalResultError('Terminal result data must be an object.');
+    }
+    if (typeof data.threadId !== 'string' || data.threadId.length === 0) {
+      throw new InvalidTerminalResultError();
+    }
+    const status = normalizeTerminalStatus(data.status);
+    if (!status) {
+      throw new InvalidTerminalStatusError();
+    }
+    const message = truncateAssistantMessage(firstString(
+      status === 'completed' ? data.finalAssistantMessage : data.lastAssistantMessage,
+    ));
+    this.#data = Object.freeze({
+      threadId: data.threadId,
+      status,
+      ...(status === 'completed'
+        ? { finalAssistantMessage: message }
+        : { lastAssistantMessage: message }),
+      changes: canonicalChanges(data.changes),
+      error: status === 'failed' ? safeError(data.error) : null,
+    });
   }
 
   static fromTerminal(input = {}) {
@@ -37,36 +89,42 @@ export class TerminalResult {
       throw new InvalidTerminalStatusError();
     }
 
-    const result = {
-      completionId: typeof input.completionId === 'string' && input.completionId.length > 0
-        ? input.completionId
-        : randomUUID(),
-      threadId: typeof input.threadId === 'string' ? input.threadId : '',
-      status,
-      assistantMessage: truncateAssistantMessage(firstString(
-        input.assistantMessage,
-        input.message,
-        input.latestAgentMessage,
-        input.text,
-      )),
-      changes: { files: terminalChanges(input).slice(0, MAX_CHANGED_FILES) },
-      error: status === 'failed' ? safeError(input.error ?? input.failure) : null,
-    };
-    optionalString(result, 'workspace', input.workspace, input.cwd);
-    optionalString(result, 'summary', input.summary);
-    optionalString(result, 'startedAt', input.startedAt);
-    optionalString(result, 'completedAt', input.completedAt);
-    if (Number.isFinite(input.durationSec)) {
-      result.durationSec = input.durationSec;
+    if (typeof input.threadId !== 'string' || input.threadId.length === 0) {
+      throw new InvalidTerminalResultError();
     }
-    return new TerminalResult(result);
+    const turn = turnRecord(input);
+    const turnMessage = extractAssistantMessage(turn);
+    const message = firstString(
+      status === 'completed' ? input.finalAssistantMessage : input.lastAssistantMessage,
+      input.assistantMessage,
+      turnMessage,
+    );
+    return new TerminalResult({
+      threadId: input.threadId,
+      status,
+      ...(status === 'completed'
+        ? { finalAssistantMessage: message }
+        : { lastAssistantMessage: message }),
+      changes: terminalChanges(input),
+      error: status === 'failed' ? safeError(input.error ?? input.failure) : null,
+    });
   }
 
   toJSON() {
     return {
-      ...this.data,
-      changes: { files: [...this.data.changes.files] },
-      error: this.data.error === null ? null : { ...this.data.error },
+      threadId: this.#data.threadId,
+      status: this.#data.status,
+      ...(this.#data.status === 'completed'
+        ? { finalAssistantMessage: this.#data.finalAssistantMessage }
+        : { lastAssistantMessage: this.#data.lastAssistantMessage }),
+      changes: {
+        files: this.#data.changes.files.map((file) => (
+          typeof file === 'string' ? file : { ...file }
+        )),
+        filesChanged: this.#data.changes.filesChanged,
+        filesTruncated: this.#data.changes.filesTruncated,
+      },
+      error: this.#data.error === null ? null : { ...this.#data.error },
     };
   }
 }
