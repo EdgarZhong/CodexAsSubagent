@@ -1,0 +1,226 @@
+import { EventEmitter } from 'node:events';
+
+import { AppServerClient } from '../../../vendor/codex-supervisor-mcp/src/app-server-client.mjs';
+import { EventStore } from '../../../vendor/codex-supervisor-mcp/src/event-store.mjs';
+
+export const SUPERVISOR_ADAPTER_METHODS = Object.freeze([
+  'startThread',
+  'resumeThread',
+  'startTurn',
+  'steerTurn',
+  'interruptTurn',
+  'listThreads',
+  'readThreadMetadata',
+  'readRecentTurns',
+  'listModels',
+  'readEffectiveConfig',
+  'subscribeRuntimeEvents',
+]);
+
+function compact(value) {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined && entry !== null),
+  );
+}
+
+function workspaceOf(input = {}) {
+  return input.workspace ?? input.cwd;
+}
+
+class BridgedEventStore extends EventStore {
+  constructor(emitter, options) {
+    super(options);
+    this.emitter = emitter;
+  }
+
+  record(...args) {
+    const event = super.record(...args);
+    this.emitter.emit('event', event);
+    return event;
+  }
+
+  recordProcessFailure(...args) {
+    const affected = super.recordProcessFailure(...args);
+    this.emitter.emit('process_failure', { affectedThreads: affected });
+    return affected;
+  }
+}
+
+function bridgeSuppliedEventStore(eventStore, emitter) {
+  if (!eventStore || typeof eventStore.record !== 'function' || eventStore.__codexAsSubagentBridged) {
+    return;
+  }
+  const originalRecord = eventStore.record.bind(eventStore);
+  eventStore.record = (...args) => {
+    const event = originalRecord(...args);
+    emitter.emit('event', event);
+    return event;
+  };
+  Object.defineProperty(eventStore, '__codexAsSubagentBridged', {
+    value: true,
+    configurable: true,
+  });
+}
+
+function assertFunction(value, name) {
+  if (typeof value !== 'function') {
+    throw new TypeError(`Supervisor adapter method ${name} must be a function.`);
+  }
+}
+
+export function assertSupervisorAdapter(adapter) {
+  for (const method of SUPERVISOR_ADAPTER_METHODS) {
+    assertFunction(adapter?.[method], method);
+  }
+  return adapter;
+}
+
+export function createFakeSupervisorAdapter(implementation = {}) {
+  const unsupported = (method) => async () => {
+    throw new Error(`Fake supervisor adapter method ${method} is not configured.`);
+  };
+  const adapter = {};
+  for (const method of SUPERVISOR_ADAPTER_METHODS) {
+    adapter[method] = implementation[method] ?? unsupported(method);
+  }
+  return adapter;
+}
+
+export function createSupervisorAdapter(options = {}) {
+  if (options.adapter) {
+    return assertSupervisorAdapter(options.adapter);
+  }
+
+  const runtimeEvents = new EventEmitter();
+  const suppliedClient = options.client ?? options.appServerClient;
+  const suppliedEventStore = options.eventStore ?? suppliedClient?.eventStore;
+  const eventStore = suppliedEventStore ?? new BridgedEventStore(runtimeEvents, options.eventStoreOptions);
+  const client = suppliedClient ?? new AppServerClient({
+    ...options.clientOptions,
+    eventStore,
+  });
+
+  if (suppliedEventStore?.on) {
+    const eventHandler = (event) => runtimeEvents.emit('event', event);
+    suppliedEventStore.on('event', eventHandler);
+  } else if (suppliedEventStore) {
+    bridgeSuppliedEventStore(suppliedEventStore, runtimeEvents);
+  }
+  if (typeof options.subscribeRuntimeEvents === 'function') {
+    options.subscribeRuntimeEvents((event) => runtimeEvents.emit('event', event));
+  }
+
+  const request = async (method, params) => await client.request(method, params);
+
+  const adapter = {
+    async startThread(input = {}) {
+      return await request('thread/start', compact({
+        cwd: workspaceOf(input),
+        model: input.model,
+        approvalPolicy: input.approvalPolicy,
+        sandbox: input.sandbox,
+      }));
+    },
+
+    async resumeThread(input = {}) {
+      return await request('thread/resume', compact({
+        threadId: input.threadId,
+        cwd: workspaceOf(input),
+        model: input.model,
+        approvalPolicy: input.approvalPolicy,
+        sandbox: input.sandbox,
+      }));
+    },
+
+    async startTurn(input = {}) {
+      const result = await request('turn/start', compact({
+        threadId: input.threadId,
+        input: [{ type: 'text', text: input.prompt ?? '' }],
+        cwd: workspaceOf(input),
+        model: input.model,
+        effort: input.effort,
+        approvalPolicy: input.approvalPolicy,
+        sandboxPolicy: input.sandboxPolicy,
+      }));
+      return {
+        threadId: input.threadId,
+        turnId: result?.turn?.id ?? null,
+        turn: result?.turn ?? null,
+      };
+    },
+
+    async steerTurn(input = {}) {
+      const result = await request('turn/steer', compact({
+        threadId: input.threadId,
+        input: [{ type: 'text', text: input.prompt ?? '' }],
+        expectedTurnId: input.expectedTurnId,
+      }));
+      return {
+        threadId: input.threadId,
+        turnId: result?.turnId ?? input.expectedTurnId ?? null,
+      };
+    },
+
+    async interruptTurn(input = {}) {
+      await request('turn/interrupt', compact({
+        threadId: input.threadId,
+        turnId: input.turnId,
+      }));
+      return { threadId: input.threadId, interrupted: true };
+    },
+
+    async listThreads(input = {}) {
+      const result = await request('thread/list', compact({
+        limit: input.limit,
+        cursor: input.cursor,
+        searchTerm: input.searchTerm,
+        cwd: workspaceOf(input),
+      }));
+      return {
+        threads: result?.data ?? result?.threads ?? [],
+        nextCursor: result?.nextCursor ?? null,
+      };
+    },
+
+    async readThreadMetadata(threadId, optionsForRead = {}) {
+      const result = await request('thread/read', {
+        threadId,
+        includeTurns: false,
+        ...optionsForRead,
+      });
+      return result?.thread ?? null;
+    },
+
+    async readRecentTurns(threadId, optionsForRead = {}) {
+      const { turnId, ...requestOptions } = optionsForRead;
+      const result = await request('thread/read', {
+        threadId,
+        includeTurns: true,
+        ...requestOptions,
+      });
+      const turns = result?.thread?.turns ?? result?.turns ?? [];
+      return {
+        turns: turnId === undefined ? turns : turns.filter((turn) => turn?.id === turnId || turn?.turnId === turnId),
+        ...(result?.nextCursor === undefined ? {} : { nextCursor: result.nextCursor }),
+      };
+    },
+
+    async listModels() {
+      const result = await request('model/list', {});
+      return result?.data ?? result?.models ?? [];
+    },
+
+    async readEffectiveConfig() {
+      const result = await request('config/read', {});
+      return result?.config ?? result ?? {};
+    },
+
+    subscribeRuntimeEvents(listener) {
+      assertFunction(listener, 'runtime event listener');
+      runtimeEvents.on('event', listener);
+      return () => runtimeEvents.off('event', listener);
+    },
+  };
+
+  return assertSupervisorAdapter(adapter);
+}
