@@ -54,6 +54,29 @@ function consistentIdentity(values) {
   return values !== null && new Set(values).size <= 1;
 }
 
+function hiddenSourceValues(event, key) {
+  const sources = event?.[key];
+  if (sources === undefined) return [];
+  if (!Array.isArray(sources) || sources.length === 0) return null;
+  return sources.map((source) => (
+    isRecord(source) && Object.hasOwn(source, 'value') ? source.value : null
+  ));
+}
+
+function hiddenStatusValues(event) {
+  const sources = event?.internalStatusSources;
+  if (sources === undefined) return [];
+  if (!Array.isArray(sources) || sources.length === 0) return null;
+  return sources.map((source) => (
+    isRecord(source) && Object.hasOwn(source, 'status') ? source.status : null
+  ));
+}
+
+function verifiedMarkerMatches(event, marker, sourceValues) {
+  if (event?.[marker] === undefined) return sourceValues !== null && sourceValues.length === 0;
+  return event[marker] === true && sourceValues !== null && sourceValues.length > 0;
+}
+
 function collectStatusValues(values) {
   const statuses = [];
   for (const value of values) {
@@ -69,7 +92,39 @@ function statusMatches(statuses, expected) {
   return statuses !== null && (statuses.length === 0 || statuses.every((status) => status === expected));
 }
 
+const ACTIVE_EXECUTION_STATUS_TOKENS = new Set([
+  'active',
+  'inprogress',
+  'queued',
+  'running',
+  'waiting',
+  'waitingonapproval',
+]);
+
+function statusToken(value) {
+  if (isRecord(value)) return statusToken(value.type ?? value.status);
+  return typeof value === 'string'
+    ? value.toLowerCase().replaceAll(/[-_\s]/g, '')
+    : null;
+}
+
+function activeExecutionStatusIsConsistent(execution) {
+  const values = [
+    execution?.status,
+    execution?.executionStatus,
+    execution?.turn?.status,
+    execution?.turnRecord?.status,
+  ].filter((value) => value !== undefined);
+  return values.every((value) => (
+    !normalizeTerminalStatus(value) && ACTIVE_EXECUTION_STATUS_TOKENS.has(statusToken(value))
+  ));
+}
+
 function terminalStatus(event, suppliedPayloads, suppliedResult) {
+  const hiddenStatuses = hiddenStatusValues(event);
+  if (event.internalStatusSources !== undefined
+    && (!verifiedMarkerMatches(event, 'verifiedTerminalStatus', hiddenStatuses))) return null;
+  if (event.verifiedTerminalStatus !== undefined && event.verifiedTerminalStatus !== true) return null;
   const verifiedTypeStatus = VERIFIED_TERMINAL_TYPES.get(eventType(event));
   const payloadStatuses = suppliedPayloads.flatMap((payload) => [payload?.status, payload?.terminalStatus]);
   const statuses = collectStatusValues([
@@ -78,6 +133,26 @@ function terminalStatus(event, suppliedPayloads, suppliedResult) {
     event.terminalStatus,
     event.turn?.status,
     event.turn?.reason,
+    event.turn?.terminalStatus,
+    event.turnRecord?.status,
+    event.turnRecord?.reason,
+    event.turnRecord?.terminalStatus,
+    event.currentTurn?.status,
+    event.currentTurn?.reason,
+    event.currentTurn?.terminalStatus,
+    event.params?.status,
+    event.params?.reason,
+    event.params?.terminalStatus,
+    event.params?.turn?.status,
+    event.params?.turn?.reason,
+    event.params?.turn?.terminalStatus,
+    event.params?.turnRecord?.status,
+    event.params?.turnRecord?.reason,
+    event.params?.turnRecord?.terminalStatus,
+    event.params?.currentTurn?.status,
+    event.params?.currentTurn?.reason,
+    event.params?.currentTurn?.terminalStatus,
+    ...(hiddenStatuses ?? []),
     ...payloadStatuses,
   ]);
   if (verifiedTypeStatus) {
@@ -136,15 +211,65 @@ export class CompletionRouter {
     if (!status) return null;
     if (suppliedResults.length > 0 && suppliedPayloads.some((payload) => !payload?.status)) return null;
 
+    const hiddenThreadIds = hiddenSourceValues(event, 'internalThreadIdentitySources');
+    const hiddenTurnIds = hiddenSourceValues(event, 'internalTurnIdentitySources');
+    if (!verifiedMarkerMatches(event, 'verifiedThreadIdentity', hiddenThreadIds)
+      || !verifiedMarkerMatches(event, 'verifiedTurnIdentity', hiddenTurnIds)) return null;
     const eventThreadIds = collectIdentityValues([
       event.threadId,
       event.thread?.id,
+      event.thread?.threadId,
       event.turn?.threadId,
       event.turn?.thread_id,
+      event.turn?.thread?.id,
+      event.turn?.thread?.threadId,
+      event.turnRecord?.threadId,
+      event.turnRecord?.thread_id,
+      event.turnRecord?.thread?.id,
+      event.turnRecord?.thread?.threadId,
+      event.currentTurn?.threadId,
+      event.currentTurn?.thread_id,
+      event.currentTurn?.thread?.id,
+      event.currentTurn?.thread?.threadId,
+      event.params?.threadId,
+      event.params?.thread?.id,
+      event.params?.thread?.threadId,
+      event.params?.turn?.threadId,
+      event.params?.turn?.thread_id,
+      event.params?.turn?.thread?.id,
+      event.params?.turn?.thread?.threadId,
+      event.params?.turnRecord?.threadId,
+      event.params?.turnRecord?.thread_id,
+      event.params?.turnRecord?.thread?.id,
+      event.params?.turnRecord?.thread?.threadId,
+      event.params?.currentTurn?.threadId,
+      event.params?.currentTurn?.thread_id,
+      event.params?.currentTurn?.thread?.id,
+      event.params?.currentTurn?.thread?.threadId,
+      event.params?.item?.threadId,
+      event.params?.item?.thread?.id,
+      event.params?.item?.thread?.threadId,
+      event.params?.item?.turn?.threadId,
+      event.params?.item?.turn?.thread_id,
+      event.params?.item?.turn?.thread?.id,
+      event.params?.item?.turn?.thread?.threadId,
+      ...(hiddenThreadIds ?? []),
     ]);
     const resultThreadIds = collectIdentityValues(suppliedPayloads.flatMap((payload) => [
       payload?.threadId,
       payload?.thread?.id,
+      payload?.thread?.threadId,
+      payload?.turn?.threadId,
+      payload?.turn?.thread_id,
+      payload?.turn?.thread?.id,
+      payload?.turn?.thread?.threadId,
+      payload?.turnRecord?.threadId,
+      payload?.turnRecord?.thread_id,
+      payload?.turnRecord?.thread?.id,
+      payload?.currentTurn?.threadId,
+      payload?.currentTurn?.thread_id,
+      payload?.currentTurn?.thread?.id,
+      payload?.currentTurn?.thread?.threadId,
     ]));
     if (!consistentIdentity(eventThreadIds)
       || !consistentIdentity(resultThreadIds)
@@ -154,6 +279,7 @@ export class CompletionRouter {
     if (!threadId) return null;
 
     const knownExecution = this.executions?.getExecution(threadId) ?? null;
+    if (knownExecution && !activeExecutionStatusIsConsistent(knownExecution)) return null;
     if (event.verifiedTurnIdentity !== undefined && event.verifiedTurnIdentity !== true) return null;
     const eventTurnIds = collectIdentityValues([
       event.turnId,
@@ -161,19 +287,66 @@ export class CompletionRouter {
       event.turn?.id,
       event.turn?.turnId,
       event.turn?.internalTurnId,
+      event.turnRecord?.id,
+      event.turnRecord?.turnId,
+      event.turnRecord?.internalTurnId,
+      event.currentTurn?.id,
+      event.currentTurn?.turnId,
+      event.currentTurn?.internalTurnId,
+      event.params?.turnId,
+      event.params?.turn?.id,
+      event.params?.turn?.turnId,
+      event.params?.turn?.internalTurnId,
+      event.params?.turnRecord?.id,
+      event.params?.turnRecord?.turnId,
+      event.params?.turnRecord?.internalTurnId,
+      event.params?.currentTurn?.id,
+      event.params?.currentTurn?.turnId,
+      event.params?.currentTurn?.internalTurnId,
+      event.params?.item?.turnId,
+      event.params?.item?.turn?.id,
+      event.params?.item?.turn?.turnId,
+      event.params?.item?.internalTurnId,
+      event.params?.diff?.turnId,
+      event.params?.diff?.turn?.id,
+      ...(hiddenTurnIds ?? []),
     ]);
     const resultTurnIds = collectIdentityValues(suppliedPayloads.flatMap((payload) => [
       payload?.turnId,
       payload?.internalTurnId,
       payload?.turn?.id,
       payload?.turn?.turnId,
+      payload?.turn?.internalTurnId,
+      payload?.turnRecord?.id,
+      payload?.turnRecord?.turnId,
+      payload?.turnRecord?.internalTurnId,
+      payload?.currentTurn?.id,
+      payload?.currentTurn?.turnId,
+      payload?.currentTurn?.internalTurnId,
     ]));
     if (!consistentIdentity(eventTurnIds) || !consistentIdentity(resultTurnIds)) return null;
     const turnIds = [...eventTurnIds, ...resultTurnIds];
     if (!consistentIdentity(turnIds)) return null;
     const eventTurnId = firstString(...eventTurnIds);
     const resultTurnId = firstString(...resultTurnIds);
-    if (knownExecution && (!eventTurnId || eventTurnId !== knownExecution.turnId)) return null;
+    const executionThreadIds = collectIdentityValues([
+      knownExecution?.threadId,
+      knownExecution?.thread?.id,
+    ]);
+    const executionTurnIds = collectIdentityValues([
+      knownExecution?.turnId,
+      knownExecution?.turn?.id,
+      knownExecution?.turn?.turnId,
+      knownExecution?.turnRecord?.id,
+      knownExecution?.turnRecord?.turnId,
+    ]);
+    if (knownExecution && (
+      !consistentIdentity(executionThreadIds)
+      || !consistentIdentity(executionTurnIds)
+      || !consistentIdentity([...eventThreadIds, ...executionThreadIds])
+      || !consistentIdentity([...eventTurnIds, ...executionTurnIds])
+    )) return null;
+    if (knownExecution && (!eventTurnId || eventTurnId !== firstString(...executionTurnIds))) return null;
     if (knownExecution && event.workspace !== undefined && event.workspace !== knownExecution.workspace) return null;
     if (!knownExecution
       && !trustedCanonical(event, suppliedResult)

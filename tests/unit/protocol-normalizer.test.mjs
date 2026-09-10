@@ -71,7 +71,87 @@ test("normalizeEvent rejects conflicting thread and turn identities", () => {
 
   assert.equal(conflict.threadId, null);
   assert.equal("internalTurnId" in conflict, false);
-  assert.equal("verifiedTurnIdentity" in conflict, false);
+  assert.equal(conflict.verifiedThreadIdentity, false);
+  assert.equal(conflict.verifiedTurnIdentity, false);
+  assert.equal("status" in conflict, false);
+  assert.equal(conflict.verifiedTerminalStatus, false);
+  assert.equal(Object.keys(conflict).includes("verifiedTurnIdentity"), false);
+});
+
+test("normalizeEvent preserves terminal status provenance and rejects status conflicts", () => {
+  for (const [method, status] of [
+    ["turn/completed", "completed"],
+    ["turn/failed", "failed"],
+    ["turn/interrupted", "interrupted"],
+  ]) {
+    const event = normalizeEvent({
+      method,
+      threadId: "thread-status",
+      turnId: "turn-status",
+      turn: { id: "turn-status", status },
+    });
+    assert.equal(event.status, status);
+    assert.equal(event.verifiedTerminalStatus, true);
+    assert.ok(event.internalStatusSources.some((source) => source.source === "event.type"));
+    assert.equal(Object.keys(event).includes("internalStatusSources"), false);
+  }
+
+  for (const input of [
+    {
+      method: "turn/completed",
+      turn: { id: "turn-status", status: "failed" },
+    },
+    {
+      method: "turn/failed",
+      turn: { id: "turn-status", status: "completed" },
+    },
+    {
+      method: "turn/interrupted",
+      turn: { id: "turn-status", status: "running" },
+    },
+    {
+      method: "error",
+      kind: "lifecycle",
+      status: "completed",
+      params: { error: { source: "app-server-process" } },
+    },
+  ]) {
+    const event = normalizeEvent({
+      threadId: "thread-status",
+      turnId: "turn-status",
+      ...input,
+    });
+    assert.equal("status" in event, false);
+    assert.equal(event.verifiedTerminalStatus, false);
+  }
+});
+
+test("normalizeEvent rejects nested thread and turn identity conflicts as non-terminal", () => {
+  const threadConflict = normalizeEvent({
+    method: "turn/completed",
+    threadId: "thread-1",
+    turnId: "turn-1",
+    turn: {
+      id: "turn-1",
+      thread: { id: "thread-2" },
+      status: "completed",
+    },
+  });
+  assert.equal(threadConflict.threadId, null);
+  assert.equal(threadConflict.verifiedThreadIdentity, false);
+  assert.equal(threadConflict.verifiedTerminalStatus, false);
+  assert.equal("status" in threadConflict, false);
+
+  const turnConflict = normalizeEvent({
+    method: "turn/completed",
+    threadId: "thread-1",
+    internalTurnId: "turn-1",
+    turnRecord: { id: "turn-2", status: "completed" },
+  });
+  assert.equal(turnConflict.verifiedTurnIdentity, false);
+  assert.equal("internalTurnId" in turnConflict, false);
+  assert.equal(turnConflict.verifiedTerminalStatus, false);
+  assert.equal("status" in turnConflict, false);
 });
 
 test("normalizeEvent supports vendor EventStore params.turn, params.item and params.diff", () => {
@@ -425,7 +505,7 @@ test("supervisor adapter bridges events from an injected EventStore", () => {
   const events = [];
   adapter.subscribeRuntimeEvents((event) => events.push(event));
 
-  eventStore.record("turn/completed", { threadId: "thread-1" });
+  eventStore.record("turn/completed", { threadId: "thread-1", turnId: "turn-1" });
   assert.deepEqual(events, [
     {
       type: "turn.completed",

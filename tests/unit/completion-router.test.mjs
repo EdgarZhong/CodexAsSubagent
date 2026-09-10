@@ -96,6 +96,32 @@ test('CompletionRouter accepts normalized terminal events and preserves their sa
   });
 });
 
+test('CompletionRouter accepts valid failed and interrupted terminal events', async (t) => {
+  const { executions, completions, router } = await setup(t);
+  const workspace = '/workspace/router-terminal-statuses';
+  for (const [threadId, turnId, type, status] of [
+    ['thread-failed', 'turn-failed', 'turn.failed', 'failed'],
+    ['thread-interrupted', 'turn-interrupted', 'turn.interrupted', 'interrupted'],
+  ]) {
+    executions.createExecution({
+      threadId,
+      turnId,
+      workspace,
+      ownerInstanceId: 'router-instance',
+    });
+    const result = router.onTerminal({
+      type,
+      status,
+      threadId,
+      turnId,
+      turn: { id: turnId, status },
+    });
+    assert.equal(result.payload.status, status);
+    assert.equal(completions.getCompletion(result.completionId).terminalStatus, status);
+    assert.equal(executions.getExecution(threadId), null);
+  }
+});
+
 test('CompletionRouter accepts an already-built verified recovery TerminalResult', async (t) => {
   const { store, completions, router } = await setup(t);
   const terminalResult = new TerminalResult({
@@ -225,6 +251,70 @@ test('CompletionRouter only accepts verified terminal types and matching identit
     }),
   }), null);
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+});
+
+test('CompletionRouter rejects nested status and identity conflicts', async (t) => {
+  const { store, executions, router } = await setup(t);
+  const threadId = 'thread-nested-conflicts';
+  const turnId = 'turn-nested-conflicts';
+  executions.createExecution({
+    threadId,
+    turnId,
+    workspace: '/workspace/router-nested-conflicts',
+    ownerInstanceId: 'router-instance',
+  });
+
+  const normalizedStatusConflict = normalizeEvent({
+    method: 'turn/completed',
+    threadId,
+    turnId,
+    turn: { id: turnId, status: 'failed' },
+  });
+  assert.equal(normalizedStatusConflict.status, undefined);
+  assert.equal(normalizedStatusConflict.verifiedTerminalStatus, false);
+  assert.equal(router.onTerminal(normalizedStatusConflict), null);
+
+  for (const event of [
+    {
+      type: 'turn.completed',
+      status: 'completed',
+      threadId,
+      turnId,
+      turn: { id: turnId, status: 'failed' },
+    },
+    {
+      type: 'turn.failed',
+      status: 'failed',
+      threadId,
+      turnId,
+      turn: { id: turnId, status: 'completed' },
+    },
+    {
+      type: 'turn.completed',
+      status: 'completed',
+      threadId,
+      turnId,
+      turn: { id: turnId, status: 'running' },
+    },
+    {
+      type: 'turn.completed',
+      status: 'completed',
+      threadId,
+      turnId,
+      turn: { id: turnId, thread: { id: 'other-thread' }, status: 'completed' },
+    },
+    {
+      type: 'turn.completed',
+      status: 'completed',
+      threadId,
+      internalTurnId: turnId,
+      turnRecord: { id: 'other-turn', status: 'completed' },
+    },
+  ]) {
+    assert.equal(router.onTerminal(event), null);
+  }
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+  assert.notEqual(executions.getExecution(threadId), null);
 });
 
 test('CompletionRouter preserves truncated normalized change metadata', async (t) => {

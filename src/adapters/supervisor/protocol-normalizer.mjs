@@ -10,62 +10,96 @@ function firstString(...values) {
   return values.find((value) => typeof value === 'string' && value.length > 0) ?? null;
 }
 
-function consistentStringIdentity(values) {
-  const identities = [];
-  for (const value of values) {
-    if (value === undefined || value === null || value === '') continue;
-    if (typeof value !== 'string') return null;
-    identities.push(value);
-  }
-  return identities.length === 0 || new Set(identities).size === 1
-    ? firstString(...identities)
-    : null;
+function identityState(candidates) {
+  const present = candidates.filter(({ value }) => value !== undefined);
+  const values = present.map(({ value }) => value);
+  const valid = values.every((value) => typeof value === 'string' && value.length > 0);
+  const consistent = valid && new Set(values).size === 1;
+  return {
+    value: consistent ? values[0] : null,
+    verified: consistent && values.length > 0,
+    sources: present.map(({ source, value }) => ({ source, value })),
+  };
 }
 
 function eventParams(event) {
   return isRecord(event?.params) ? event.params : {};
 }
 
-function extractThreadId(event) {
+function threadIdentityCandidates(event) {
   const params = eventParams(event);
-  return consistentStringIdentity([
-    event?.threadId,
-    event?.thread?.id,
-    event?.turn?.threadId,
-    event?.turn?.thread_id,
-    params.threadId,
-    params.thread?.id,
-    params.turn?.threadId,
-    params.turn?.thread_id,
-    params.item?.threadId,
-    params.item?.thread?.id,
-  ]);
+  return [
+    { source: 'event.threadId', value: event?.threadId },
+    { source: 'event.thread.id', value: event?.thread?.id },
+    { source: 'event.thread.threadId', value: event?.thread?.threadId },
+    { source: 'event.turn.threadId', value: event?.turn?.threadId },
+    { source: 'event.turn.thread_id', value: event?.turn?.thread_id },
+    { source: 'event.turn.thread.id', value: event?.turn?.thread?.id },
+    { source: 'event.turnRecord.threadId', value: event?.turnRecord?.threadId },
+    { source: 'event.turnRecord.thread_id', value: event?.turnRecord?.thread_id },
+    { source: 'event.turnRecord.thread.id', value: event?.turnRecord?.thread?.id },
+    { source: 'event.currentTurn.threadId', value: event?.currentTurn?.threadId },
+    { source: 'event.currentTurn.thread_id', value: event?.currentTurn?.thread_id },
+    { source: 'event.currentTurn.thread.id', value: event?.currentTurn?.thread?.id },
+    { source: 'params.threadId', value: params.threadId },
+    { source: 'params.thread.id', value: params.thread?.id },
+    { source: 'params.thread.threadId', value: params.thread?.threadId },
+    { source: 'params.turn.threadId', value: params.turn?.threadId },
+    { source: 'params.turn.thread_id', value: params.turn?.thread_id },
+    { source: 'params.turn.thread.id', value: params.turn?.thread?.id },
+    { source: 'params.turnRecord.threadId', value: params.turnRecord?.threadId },
+    { source: 'params.turnRecord.thread_id', value: params.turnRecord?.thread_id },
+    { source: 'params.turnRecord.thread.id', value: params.turnRecord?.thread?.id },
+    { source: 'params.currentTurn.threadId', value: params.currentTurn?.threadId },
+    { source: 'params.currentTurn.thread_id', value: params.currentTurn?.thread_id },
+    { source: 'params.currentTurn.thread.id', value: params.currentTurn?.thread?.id },
+    { source: 'params.item.threadId', value: params.item?.threadId },
+    { source: 'params.item.thread.id', value: params.item?.thread?.id },
+    { source: 'params.item.turn.threadId', value: params.item?.turn?.threadId },
+    { source: 'params.item.turn.thread_id', value: params.item?.turn?.thread_id },
+    { source: 'params.item.turn.thread.id', value: params.item?.turn?.thread?.id },
+  ];
+}
+
+function extractThreadId(event) {
+  return identityState(threadIdentityCandidates(event)).value;
+}
+
+function turnIdentityCandidates(event) {
+  const params = eventParams(event);
+  return [
+    { source: 'event.turnId', value: event?.turnId },
+    { source: 'event.internalTurnId', value: event?.internalTurnId },
+    { source: 'event.turn.id', value: event?.turn?.id },
+    { source: 'event.turn.turnId', value: event?.turn?.turnId },
+    { source: 'event.turn.internalTurnId', value: event?.turn?.internalTurnId },
+    { source: 'event.turnRecord.id', value: event?.turnRecord?.id },
+    { source: 'event.turnRecord.turnId', value: event?.turnRecord?.turnId },
+    { source: 'event.turnRecord.internalTurnId', value: event?.turnRecord?.internalTurnId },
+    { source: 'event.currentTurn.id', value: event?.currentTurn?.id },
+    { source: 'event.currentTurn.turnId', value: event?.currentTurn?.turnId },
+    { source: 'event.currentTurn.internalTurnId', value: event?.currentTurn?.internalTurnId },
+    { source: 'params.turnId', value: params.turnId },
+    { source: 'params.turn.internalTurnId', value: params.turn?.internalTurnId },
+    { source: 'params.turn.id', value: params.turn?.id },
+    { source: 'params.turn.turnId', value: params.turn?.turnId },
+    { source: 'params.turnRecord.id', value: params.turnRecord?.id },
+    { source: 'params.turnRecord.turnId', value: params.turnRecord?.turnId },
+    { source: 'params.turnRecord.internalTurnId', value: params.turnRecord?.internalTurnId },
+    { source: 'params.currentTurn.id', value: params.currentTurn?.id },
+    { source: 'params.currentTurn.turnId', value: params.currentTurn?.turnId },
+    { source: 'params.currentTurn.internalTurnId', value: params.currentTurn?.internalTurnId },
+    { source: 'params.item.turnId', value: params.item?.turnId },
+    { source: 'params.item.turn.id', value: params.item?.turn?.id },
+    { source: 'params.item.turn.turnId', value: params.item?.turn?.turnId },
+    { source: 'params.item.internalTurnId', value: params.item?.internalTurnId },
+    { source: 'params.diff.turnId', value: params.diff?.turnId },
+    { source: 'params.diff.turn.id', value: params.diff?.turn?.id },
+  ];
 }
 
 function extractTurnId(event) {
-  const params = eventParams(event);
-  const turn = currentTurnRecord(event);
-  return consistentStringIdentity([
-    event?.turnId,
-    event?.internalTurnId,
-    event?.turn?.id,
-    event?.turn?.turnId,
-    event?.turn?.internalTurnId,
-    event?.turnRecord?.id,
-    event?.turnRecord?.turnId,
-    event?.currentTurn?.id,
-    event?.currentTurn?.turnId,
-    params.turnId,
-    params.turn?.id,
-    params.turn?.turnId,
-    params.turn?.internalTurnId,
-    params.item?.turnId,
-    params.item?.turn?.id,
-    params.diff?.turnId,
-    params.diff?.turn?.id,
-    turn?.id,
-    turn?.turnId,
-  ]);
+  return identityState(turnIdentityCandidates(event)).value;
 }
 
 function currentTurnRecord(event) {
@@ -254,20 +288,50 @@ function eventType(event) {
   return normalized;
 }
 
-function terminalStatus(event, type) {
-  if (type === 'supervisor.process.failed') {
-    return 'failed';
-  }
-  if (type === 'turn.failed') return 'failed';
-  if (type === 'turn.interrupted') return 'interrupted';
-  if (type !== 'turn.completed') return null;
+const TERMINAL_EVENT_STATUSES = new Map([
+  ['turn.completed', 'completed'],
+  ['turn.failed', 'failed'],
+  ['turn.interrupted', 'interrupted'],
+  ['supervisor.process.failed', 'failed'],
+]);
+
+function collectStatusSources(event) {
   const params = eventParams(event);
-  return normalizeTerminalStatus(
-    event?.status
-      ?? event?.turn?.status
-      ?? params.status
-      ?? params.turn?.status,
-  ) ?? 'completed';
+  const records = [
+    ['event', event],
+    ['event.turn', event?.turn],
+    ['event.turnRecord', event?.turnRecord],
+    ['event.currentTurn', event?.currentTurn],
+    ['params', params],
+    ['params.turn', params.turn],
+    ['params.turnRecord', params.turnRecord],
+    ['params.currentTurn', params.currentTurn],
+    ['params.item', params.item],
+    ['params.diff', params.diff],
+  ];
+  const sources = [{ source: 'event.type', status: null }];
+  for (const [source, record] of records) {
+    if (!isRecord(record)) continue;
+    for (const field of ['status', 'reason', 'terminalStatus']) {
+      if (Object.hasOwn(record, field)) {
+        sources.push({
+          source: `${source}.${field}`,
+          status: normalizeTerminalStatus(record[field]),
+        });
+      }
+    }
+  }
+  return sources;
+}
+
+function terminalStatus(event, type) {
+  const expected = TERMINAL_EVENT_STATUSES.get(type);
+  const sources = collectStatusSources(event);
+  if (!expected) return { status: null, sources: [] };
+
+  sources[0].status = expected;
+  const valid = sources.every(({ status }) => status === expected);
+  return { status: valid ? expected : null, sources };
 }
 
 function assistantText(event, type) {
@@ -285,8 +349,10 @@ function assistantText(event, type) {
 
 export function normalizeEvent(event) {
   const type = eventType(event);
-  const threadId = extractThreadId(event);
-  const internalTurnId = extractTurnId(event);
+  const threadIdentity = identityState(threadIdentityCandidates(event));
+  const turnIdentity = identityState(turnIdentityCandidates(event));
+  const threadId = threadIdentity.value;
+  const internalTurnId = turnIdentity.value;
   const publicType = type === 'supervisor.process.failed' && !threadId
     ? 'supervisor.process.notice'
     : type;
@@ -294,7 +360,12 @@ export function normalizeEvent(event) {
     type: publicType,
     threadId,
   };
-  const status = publicType === 'supervisor.process.notice' ? null : terminalStatus(event, type);
+  const statusInfo = terminalStatus(event, type);
+  const statusVerified = publicType !== 'supervisor.process.notice'
+    && statusInfo.status !== null
+    && threadIdentity.verified
+    && turnIdentity.verified;
+  const status = statusVerified ? statusInfo.status : null;
   if (status) normalized.status = status;
   const message = assistantText(event, type);
   if (message !== null) normalized.assistantMessage = truncateAssistantMessage(message);
@@ -308,18 +379,41 @@ export function normalizeEvent(event) {
       ? { code: 'app_server_crash', message: 'Codex app-server process failed.' }
       : safeError(error);
   }
+  const hiddenProperties = {
+    internalThreadIdentitySources: {
+      value: Object.freeze(threadIdentity.sources.map((source) => Object.freeze({ ...source }))),
+      enumerable: false,
+    },
+    verifiedThreadIdentity: {
+      value: threadIdentity.verified,
+      enumerable: false,
+    },
+    internalTurnIdentitySources: {
+      value: Object.freeze(turnIdentity.sources.map((source) => Object.freeze({ ...source }))),
+      enumerable: false,
+    },
+    verifiedTurnIdentity: {
+      value: turnIdentity.verified,
+      enumerable: false,
+    },
+  };
   if (internalTurnId) {
-    Object.defineProperties(normalized, {
-      internalTurnId: {
-        value: internalTurnId,
-        enumerable: false,
-      },
-      verifiedTurnIdentity: {
-        value: true,
-        enumerable: false,
-      },
-    });
+    hiddenProperties.internalTurnId = {
+      value: internalTurnId,
+      enumerable: false,
+    };
   }
+  if (TERMINAL_EVENT_STATUSES.has(type) && publicType !== 'supervisor.process.notice') {
+    hiddenProperties.internalStatusSources = {
+      value: Object.freeze(statusInfo.sources.map((source) => Object.freeze({ ...source }))),
+      enumerable: false,
+    };
+    hiddenProperties.verifiedTerminalStatus = {
+      value: statusVerified,
+      enumerable: false,
+    };
+  }
+  Object.defineProperties(normalized, hiddenProperties);
   return normalized;
 }
 
