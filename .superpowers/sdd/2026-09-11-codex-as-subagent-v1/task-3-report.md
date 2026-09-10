@@ -290,3 +290,121 @@ tests/unit/sqlite-store.test.mjs
   四个命令均退出码 `0`，无输出。
 - `git diff --check 3a19f07 HEAD`：退出码 `0`，无输出。
 - 当前工作区干净；未回退任何已写文件，暂停后续扩展实现。
+
+## Fix round 1：review findings 修复
+
+- 修复 commit：`8f457a8`。
+- 本轮未创建子 Agent。
+- 只修改了以下四个 Task 3 文件：
+  - `src/adapters/sqlite/sqlite-store.mjs`
+  - `src/core/completion-router.mjs`
+  - `tests/unit/sqlite-store.test.mjs`
+  - `tests/unit/completion-router.test.mjs`
+- `src/core/execution-store.mjs` 与 `src/core/completion-store.mjs` 本轮无需改动，保留原实现。
+
+### Findings 对应修复
+
+1. Critical：`CompletionRouter` 现在只接受明确的 Adapter-verified terminal type：`turn.completed`、`turn.failed`、`turn.interrupted`、`supervisor.process.failed`；不再仅凭 `status`/`reason` 推断。已构造的 `TerminalResult` 只能通过明确 `provenance = canonical|recovery` 的严格 canonical/recovery 路径进入。普通 `error` 与 `item.completed`（即使附带 completed/failed status）均不创建 completion、不删除 active execution。
+2. Important 1：Router 拒绝 event threadId 与 supplied TerminalResult threadId 不一致，拒绝 event/result status 冲突；SQLite canonical payload 现在强制 payload threadId/turnId 与 completion 行身份一致，并校验外部 status 与 payload status 一致。
+3. Important 2：active execution 存在时，event turnId 必须匹配当前 execution；无 active execution 时，只有严格 canonical/recovery provenance 才允许插入，普通 terminal event fail closed。
+4. Important 3：normalized changes 通过安全的匹配 turn 传递时，Router 会再次使用已经验证的 `filesChanged`/`filesTruncated` 元数据构造 canonical result，不会把 25 个总变更错误重算成 20 个且 false。
+5. Minor：新增 `claimed_direct` 恰好 30 秒 lease expiry 测试；新增普通 error、item.completed、turn mismatch、event/result status conflict、thread identity mismatch 和 payload identity 负向测试。
+6. Hook race 测试改为两个 `node:worker_threads` Worker；通过 `SharedArrayBuffer`/`Atomics` barrier 同步起跑，各自打开独立 SQLite 连接并竞争同一 pending completion，最终只允许一个 claim。
+
+### Fix round 1 覆盖测试命令与完整输出
+
+#### `node --test tests/unit/sqlite-store.test.mjs tests/unit/completion-router.test.mjs`
+
+```text
+✔ CompletionRouter persists terminal result first and ignores non-terminal events (5.826458ms)
+✔ CompletionRouter accepts normalized terminal events and preserves their safe turn changes (2.569875ms)
+✔ CompletionRouter accepts an already-built canonical TerminalResult (2.372209ms)
+✔ CompletionRouter only accepts verified terminal types and matching identities (3.04425ms)
+✔ CompletionRouter preserves truncated normalized change metadata (2.978375ms)
+✔ CompletionRouter routes a reserved direct terminal result without holding a delivery lock (3.162125ms)
+✔ SqliteStore creates the durable schema and required SQLite pragmas (4.631084ms)
+✔ terminal completion commits before delivery and duplicate thread/turn is idempotent (4.737417ms)
+✔ direct reservation uses compare-and-set, ACK is required, and expired leases requeue (5.669583ms)
+✔ two racing Hook Workers can claim a pending completion only once (29.20075ms)
+✔ SqliteStore rejects payload identity and status conflicts (2.44175ms)
+ℹ tests 11
+ℹ suites 0
+ℹ pass 11
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 92.353125
+```
+
+退出码：`0`。
+
+#### `npm test`
+
+```text
+> codex-as-subagent@0.1.0 test
+> node --test 'tests/**/*.test.mjs'
+
+✔ CompletionRouter persists terminal result first and ignores non-terminal events (7.824583ms)
+✔ CompletionRouter accepts normalized terminal events and preserves their safe turn changes (3.003875ms)
+✔ CompletionRouter accepts an already-built canonical TerminalResult (2.502167ms)
+✔ CompletionRouter only accepts verified terminal types and matching identities (2.32825ms)
+✔ CompletionRouter preserves truncated normalized change metadata (2.078083ms)
+✔ CompletionRouter routes a reserved direct terminal result without holding a delivery lock (2.454875ms)
+✔ project layout exposes the V1 foundation (2.495833ms)
+✔ normalizeEvent returns a bounded public projection without internal ids (0.898ms)
+✔ normalizeEvent supports vendor EventStore params.turn, params.item and params.diff (0.214959ms)
+✔ ordinary error and item completion are not terminal events (0.295041ms)
+✔ changed files come only from the current turn structured record (0.292917ms)
+✔ history adapter exposes turn-scoped history and never queries repository git state (0.414042ms)
+✔ publicProjection recursively removes internal protocol fields (0.107791ms)
+✔ supervisor adapter defines the complete fake contract and maps operations (0.590917ms)
+✔ supervisor adapter bridges events from an injected EventStore (0.095ms)
+✔ supervisor adapter emits one thread-scoped terminal event per active process failure (0.815166ms)
+✔ fake adapter rejects invalid or unknown injected implementations (0.283583ms)
+✔ SqliteStore creates the durable schema and required SQLite pragmas (4.895833ms)
+✔ terminal completion commits before delivery and duplicate thread/turn is idempotent (4.672083ms)
+✔ direct reservation uses compare-and-set, ACK is required, and expired leases requeue (3.884375ms)
+✔ two racing Hook Workers can claim a pending completion only once (25.824042ms)
+✔ SqliteStore rejects payload identity and status conflicts (1.845125ms)
+✔ TerminalResult completed payload is bounded and strips internal fields (1.026708ms)
+✔ TerminalResult failed and interrupted payloads preserve safe terminal details (0.436208ms)
+✔ TerminalResult omits invalid duration values (0.074875ms)
+✔ TerminalResult rejects non-terminal status (0.15925ms)
+✔ TerminalResult requires verified turn provenance and a non-empty thread id (0.10975ms)
+✔ ModelService resolves default and explicit model/effort pairs (0.305208ms)
+✔ WorkspaceGuard.resolve returns the canonical realpath (2.028458ms)
+✔ WorkspaceGuard.resolve rejects a missing workspace (0.872083ms)
+✔ WorkspaceGuard.assertThreadWorkspace fails closed for missing metadata and cross-workspace threads (1.284625ms)
+ℹ tests 31
+ℹ suites 0
+ℹ pass 31
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 94.24775
+```
+
+退出码：`0`。
+
+#### 目标源码 `node --check`
+
+```text
+node --check src/adapters/sqlite/sqlite-store.mjs
+node --check src/core/execution-store.mjs
+node --check src/core/completion-store.mjs
+node --check src/core/completion-router.mjs
+```
+
+完整输出：无；四个命令均退出码 `0`。
+
+#### `git diff --check HEAD^ HEAD`
+
+完整输出：无；退出码 `0`。
+
+#### Fix round 1 最终状态
+
+- `git status --short --branch`：`## codex/autonomous-v1`，工作区干净。
+- 本轮无测试失败；一次 patch 工具的多段同文件格式错误未产生文件改动，随后拆分 patch 成功完成。
+- 实现 commit 为 `8f457a8`；报告将在本节之后作为独立文档 commit 提交。
