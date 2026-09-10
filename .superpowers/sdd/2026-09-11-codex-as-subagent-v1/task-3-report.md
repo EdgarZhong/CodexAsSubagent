@@ -274,3 +274,19 @@ tests/unit/sqlite-store.test.mjs
 - `npm run lint` 当前仓库脚本只检查 `src/cli/main.mjs`；本轮另行对 4 个 Task 3 源码运行了 `node --check`。
 - `DatabaseSync` 是同步 API；本轮实现的事务均是同步短事务。后续调用方不能在事务边界内加入等待、网络操作或 stdout 写入。
 - 报告提交是实现 commit 之后的独立文档提交；实现 commit SHA 为 `5b7b533`。
+
+## 暂停前最终复核
+
+- 已完成测试：此前最终 `npm test` 为 28/28，Task 3 focused unit 为 8/8。
+- 最小语法检查：
+
+  ```text
+  node --check src/adapters/sqlite/sqlite-store.mjs
+  node --check src/core/execution-store.mjs
+  node --check src/core/completion-store.mjs
+  node --check src/core/completion-router.mjs
+  ```
+
+  四个命令均退出码 `0`，无输出。
+- `git diff --check 3a19f07 HEAD`：退出码 `0`，无输出。
+- 当前工作区干净；未回退任何已写文件，暂停后续扩展实现。
