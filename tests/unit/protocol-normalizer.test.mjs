@@ -6,6 +6,7 @@ import {
   createFakeSupervisorAdapter,
   SUPERVISOR_ADAPTER_METHODS,
 } from "../../src/adapters/supervisor/app-server-adapter.mjs";
+import { EventStore } from "../../vendor/codex-supervisor-mcp/src/event-store.mjs";
 import { createHistoryAdapter } from "../../src/adapters/supervisor/history-adapter.mjs";
 import {
   normalizeEvent,
@@ -151,6 +152,17 @@ test("ordinary error and item completion are not terminal events", () => {
     error: { code: "app_server_crash", message: "Codex app-server process failed." },
   });
   assert.doesNotMatch(JSON.stringify(processFailure), /sequence|turnId|params|raw process details/);
+
+  const unscopedProcessFailure = normalizeEvent({
+    type: "process_failure",
+    affectedThreads: 2,
+  });
+  assert.deepEqual(unscopedProcessFailure, {
+    type: "supervisor.process.notice",
+    threadId: null,
+    error: { code: "app_server_crash", message: "Codex app-server process failed." },
+  });
+  assert.equal("status" in unscopedProcessFailure, false);
 });
 
 test("changed files come only from the current turn structured record", () => {
@@ -192,6 +204,38 @@ test("changed files come only from the current turn structured record", () => {
       turn: { id: "turn-1", changes: { files: ["missing-event-turn-id.mjs"] } },
     }),
     { files: [], filesChanged: 0, filesTruncated: false },
+  );
+  assert.deepEqual(
+    extractTurnChanges({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      turn: { id: "turn-1" },
+      fileChanges: [{ path: "top-level.mjs", kind: "modified", turnId: "turn-1" }],
+      params: {
+        turnId: "turn-1",
+        fileChanges: [{ path: "unscoped-params.mjs", kind: "modified" }],
+      },
+    }),
+    { files: [], filesChanged: 0, filesTruncated: false },
+  );
+  assert.deepEqual(
+    extractTurnChanges({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      turn: { id: "turn-1" },
+      params: {
+        turnId: "turn-1",
+        fileChanges: {
+          turnId: "turn-1",
+          files: [{ path: "scoped-params.mjs", kind: "added" }],
+        },
+      },
+    }),
+    {
+      files: [{ path: "scoped-params.mjs", kind: "added" }],
+      filesChanged: 1,
+      filesTruncated: false,
+    },
   );
 });
 
@@ -363,6 +407,42 @@ test("supervisor adapter bridges events from an injected EventStore", () => {
       changes: { files: [], filesChanged: 0, filesTruncated: false },
     },
   ]);
+});
+
+test("supervisor adapter emits one thread-scoped terminal event per active process failure", () => {
+  const eventStore = new EventStore();
+  const adapter = createSupervisorAdapter({
+    eventStore,
+    client: {
+      eventStore,
+      async request() {
+        return {};
+      },
+    },
+  });
+  const events = [];
+  adapter.subscribeRuntimeEvents((event) => events.push(event));
+
+  eventStore.recordTurnStart("thread-1", { id: "turn-1" });
+  eventStore.recordTurnStart("thread-2", { id: "turn-2" });
+  eventStore.recordProcessFailure(new Error("raw process details"));
+
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.map(({ threadId, type, status, error }) => ({ threadId, type, status, error })), [
+    {
+      threadId: "thread-1",
+      type: "supervisor.process.failed",
+      status: "failed",
+      error: { code: "app_server_crash", message: "Codex app-server process failed." },
+    },
+    {
+      threadId: "thread-2",
+      type: "supervisor.process.failed",
+      status: "failed",
+      error: { code: "app_server_crash", message: "Codex app-server process failed." },
+    },
+  ]);
+  assert.ok(events.every((event) => event.threadId));
 });
 
 test("fake adapter rejects invalid or unknown injected implementations", async () => {

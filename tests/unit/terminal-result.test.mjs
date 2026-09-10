@@ -11,6 +11,7 @@ function terminalInput(status, overrides = {}) {
     turnId: "turn-1",
     eventCursor: 42,
     workspace: "/workspace",
+    durationSec: 184.9,
     status,
     assistantMessage: "a".repeat(16_500),
     changes: { files: ["untrusted-top-level.mjs"] },
@@ -32,6 +33,7 @@ test("TerminalResult completed payload is bounded and strips internal fields", (
 
   assert.equal(json.status, "completed");
   assert.equal(json.threadId, "thread-1");
+  assert.equal(json.durationSec, 184);
   assert.equal(json.finalAssistantMessage.length, 16_000);
   assert.equal(json.changes.files.length, 20);
   assert.equal(json.changes.filesChanged, 25);
@@ -47,6 +49,7 @@ test("TerminalResult failed and interrupted payloads preserve safe terminal deta
   assert.deepEqual(failed.toJSON(), {
     threadId: "thread-1",
     status: "failed",
+    durationSec: 184,
     lastAssistantMessage: "a".repeat(16_000),
     changes: {
       files: Array.from({ length: 20 }, (_, index) => ({
@@ -76,6 +79,17 @@ test("TerminalResult failed and interrupted payloads preserve safe terminal deta
   });
   assert.equal(interrupted.toJSON().error, null);
   assert.equal("finalAssistantMessage" in interrupted.toJSON(), false);
+});
+
+test("TerminalResult omits invalid duration values", () => {
+  for (const durationSec of [Number.NaN, Number.POSITIVE_INFINITY, -1, "184"]) {
+    const result = new TerminalResult({
+      threadId: "thread-1",
+      status: "completed",
+      durationSec,
+    });
+    assert.equal("durationSec" in result.toJSON(), false);
+  }
 });
 
 test("TerminalResult rejects non-terminal status", () => {

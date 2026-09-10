@@ -109,7 +109,24 @@ function fileChangesFromTurn(turn) {
   return files;
 }
 
-function fileChangesFromParams(params) {
+function scopedFileChanges(value, expectedTurnId) {
+  if (Array.isArray(value)) {
+    return value.filter((file) => (
+      isRecord(file)
+      && firstString(file.turnId, file.turn?.id) === expectedTurnId
+    ));
+  }
+  if (!isRecord(value) || firstString(value.turnId, value.turn?.id) !== expectedTurnId) {
+    return [];
+  }
+  if (Array.isArray(value.files)) return value.files;
+  if (Array.isArray(value.fileChanges)) return value.fileChanges;
+  if (isRecord(value.changes) && Array.isArray(value.changes.files)) return value.changes.files;
+  if (Array.isArray(value.changes)) return value.changes;
+  return [];
+}
+
+function fileChangesFromParams(params, expectedTurnId) {
   const files = [];
   if (isRecord(params.diff)) {
     if (Array.isArray(params.diff.files)) files.push(...params.diff.files);
@@ -118,7 +135,7 @@ function fileChangesFromParams(params) {
       files.push(...params.diff.changes.files);
     }
   }
-  if (Array.isArray(params.fileChanges)) files.push(...params.fileChanges);
+  files.push(...scopedFileChanges(params.fileChanges, expectedTurnId));
   files.push(...itemFileChanges(params.item));
   return files;
 }
@@ -130,7 +147,7 @@ export function extractTurnChanges(event) {
   }
   return summarizeChangedFiles([
     ...fileChangesFromTurn(scoped.turn),
-    ...fileChangesFromParams(eventParams(event)),
+    ...fileChangesFromParams(eventParams(event), scoped.eventTurnId),
   ]);
 }
 
@@ -236,15 +253,19 @@ function assistantText(event, type) {
 
 export function normalizeEvent(event) {
   const type = eventType(event);
+  const threadId = extractThreadId(event);
+  const publicType = type === 'supervisor.process.failed' && !threadId
+    ? 'supervisor.process.notice'
+    : type;
   const normalized = {
-    type,
-    threadId: extractThreadId(event),
+    type: publicType,
+    threadId,
   };
-  const status = terminalStatus(event, type);
+  const status = publicType === 'supervisor.process.notice' ? null : terminalStatus(event, type);
   if (status) normalized.status = status;
   const message = assistantText(event, type);
   if (message !== null) normalized.assistantMessage = truncateAssistantMessage(message);
-  if (type === 'turn.completed' || type === 'turn.failed' || type === 'turn.interrupted' || type === 'turn.diff.updated') {
+  if (publicType === 'turn.completed' || publicType === 'turn.failed' || publicType === 'turn.interrupted' || publicType === 'turn.diff.updated') {
     normalized.changes = extractTurnChanges(event);
   }
   if (type === 'error' || type === 'supervisor.process.failed') {

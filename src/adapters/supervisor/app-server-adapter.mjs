@@ -45,12 +45,7 @@ class BridgedEventStore extends EventStore {
   }
 
   recordProcessFailure(...args) {
-    const affected = super.recordProcessFailure(...args);
-    emitSafeRuntimeEvent(this.emitter, {
-      type: 'process_failure',
-      affectedThreads: Number.isInteger(affected) && affected >= 0 ? affected : 0,
-    });
-    return affected;
+    return super.recordProcessFailure(...args);
   }
 }
 

@@ -17,6 +17,13 @@ function firstString(...values) {
   return values.find((value) => typeof value === 'string') ?? '';
 }
 
+function safeDurationSec(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+  return Math.max(0, Math.floor(value));
+}
+
 function turnRecord(input) {
   return input?.turn ?? input?.turnRecord ?? input?.currentTurn ?? null;
 }
@@ -69,12 +76,14 @@ export class TerminalResult {
     if (!status) {
       throw new InvalidTerminalStatusError();
     }
+    const durationSec = safeDurationSec(data.durationSec);
     const message = truncateAssistantMessage(firstString(
       status === 'completed' ? data.finalAssistantMessage : data.lastAssistantMessage,
     ));
     this.#data = Object.freeze({
       threadId: data.threadId,
       status,
+      ...(durationSec === undefined ? {} : { durationSec }),
       ...(status === 'completed'
         ? { finalAssistantMessage: message }
         : { lastAssistantMessage: message }),
@@ -105,6 +114,7 @@ export class TerminalResult {
       ...(status === 'completed'
         ? { finalAssistantMessage: message }
         : { lastAssistantMessage: message }),
+      durationSec: input.durationSec,
       changes: terminalChanges(input),
       error: status === 'failed' ? safeError(input.error ?? input.failure) : null,
     });
@@ -114,6 +124,7 @@ export class TerminalResult {
     return {
       threadId: this.#data.threadId,
       status: this.#data.status,
+      ...(this.#data.durationSec === undefined ? {} : { durationSec: this.#data.durationSec }),
       ...(this.#data.status === 'completed'
         ? { finalAssistantMessage: this.#data.finalAssistantMessage }
         : { lastAssistantMessage: this.#data.lastAssistantMessage }),
