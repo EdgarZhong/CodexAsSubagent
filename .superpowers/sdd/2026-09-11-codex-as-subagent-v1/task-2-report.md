@@ -365,3 +365,159 @@ node --check src/core/model-service.mjs
 
 - 仍未启动真实 Codex app-server；vendor 真实进程生命周期、真实 model/config wire response 和真实 terminal notification 需后续 integration/E2E 验证。
 - 本轮没有实现 SQLite、Runtime、MCP、Hook 或 recovery；这些均保持在 Task 3 及后续任务边界内。
+
+## Fix round 2：第二轮 Important findings 修复
+
+### 修复提交
+
+- fix 实现提交：`d70fe7a`
+- 本轮未创建子 Agent，未扩大到 Task 3。
+- 修复文件共 5 个：
+  - `src/adapters/supervisor/app-server-adapter.mjs`
+  - `src/adapters/supervisor/protocol-normalizer.mjs`
+  - `src/core/terminal-result.mjs`
+  - `tests/unit/protocol-normalizer.test.mjs`
+  - `tests/unit/terminal-result.test.mjs`
+
+### Findings 对应修复
+
+1. `params.fileChanges` 现在只有在自身携带并匹配当前 event turn identity 时才会进入 changed-files projection：支持带 `turnId` 的对象包装（如 `{ turnId, files }`）和每项明确带匹配 `turnId` 的数组；event `turnId` 存在但 `params.fileChanges` 无自身归属时归零。top-level `event.fileChanges`/`event.changes` 仍不读取。
+2. `BridgedEventStore.recordProcessFailure()` 不再额外 emit 无 `threadId` 的汇总 terminal event。上游 `EventStore.recordProcessFailure()` 为每个 active thread 写入的 lifecycle `error` 记录各自经过 `normalizeEvent`，因此每个 active execution 只产生一条带 `threadId` 的 `supervisor.process.failed` / `failed` projection。Normalizer 对防御性接收到的无线程 process failure 输出非终态 `supervisor.process.notice`，不带 `status`。
+3. `TerminalResult` 恢复安全 `durationSec`：仅接受有限、非负 number，向下取整为非负整数；无效值省略。`fromTerminal()`、构造函数和 `toJSON()` 均保持 canonical whitelist，completed 与 failed 结果均覆盖该字段。
+
+### Fix round 2 覆盖测试命令与完整输出
+
+#### 聚焦回归
+
+命令：
+
+```text
+node --test tests/unit/protocol-normalizer.test.mjs tests/unit/terminal-result.test.mjs
+```
+
+完整输出：
+
+```text
+✔ normalizeEvent returns a bounded public projection without internal ids (0.773166ms)
+✔ normalizeEvent supports vendor EventStore params.turn, params.item and params.diff (0.190833ms)
+✔ ordinary error and item completion are not terminal events (0.123209ms)
+✔ changed files come only from the current turn structured record (0.106291ms)
+✔ history adapter exposes turn-scoped history and never queries repository git state (0.204083ms)
+✔ publicProjection recursively removes internal protocol fields (0.082125ms)
+✔ supervisor adapter defines the complete fake contract and maps operations (0.407666ms)
+✔ supervisor adapter bridges events from an injected EventStore (0.082333ms)
+✔ supervisor adapter emits one thread-scoped terminal event per active process failure (1.062041ms)
+✔ fake adapter rejects invalid or unknown injected implementations (0.236917ms)
+✔ TerminalResult completed payload is bounded and strips internal fields (0.683125ms)
+✔ TerminalResult failed and interrupted payloads preserve safe terminal details (0.394833ms)
+✔ TerminalResult omits invalid duration values (0.06375ms)
+✔ TerminalResult rejects non-terminal status (0.148166ms)
+✔ TerminalResult requires verified turn provenance and a non-empty thread id (0.111833ms)
+✔ ModelService resolves default and explicit model/effort pairs (0.298083ms)
+ℹ tests 16
+ℹ pass 16
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 43.066875
+```
+
+#### 完整 `npm test`
+
+命令：
+
+```text
+npm test
+```
+
+完整输出：
+
+```text
+> codex-as-subagent@0.1.0 test
+> node --test 'tests/**/*.test.mjs'
+
+✔ project layout exposes the V1 foundation (2.158417ms)
+✔ normalizeEvent returns a bounded public projection without internal ids (0.874334ms)
+✔ normalizeEvent supports vendor EventStore params.turn, params.item and params.diff (0.198041ms)
+✔ ordinary error and item completion are not terminal events (0.139625ms)
+✔ changed files come only from the current turn structured record (0.1035ms)
+✔ history adapter exposes turn-scoped history and never queries repository git state (0.209916ms)
+✔ publicProjection recursively removes internal protocol fields (0.085959ms)
+✔ supervisor adapter defines the complete fake contract and maps operations (0.421292ms)
+✔ supervisor adapter bridges events from an injected EventStore (0.089ms)
+✔ supervisor adapter emits one thread-scoped terminal event per active process failure (0.855292ms)
+✔ fake adapter rejects invalid or unknown injected implementations (0.234583ms)
+✔ TerminalResult completed payload is bounded and strips internal fields (0.672042ms)
+✔ TerminalResult failed and interrupted payloads preserve safe terminal details (0.453917ms)
+✔ TerminalResult omits invalid duration values (0.108167ms)
+✔ TerminalResult rejects non-terminal status (0.161833ms)
+✔ TerminalResult requires verified turn provenance and a non-empty thread id (0.1145ms)
+✔ ModelService resolves default and explicit model/effort pairs (0.3055ms)
+✔ WorkspaceGuard.resolve returns the canonical realpath (1.506291ms)
+✔ WorkspaceGuard.resolve rejects a missing workspace (0.576084ms)
+✔ WorkspaceGuard.assertThreadWorkspace fails closed for missing metadata and cross-workspace threads (1.438958ms)
+ℹ tests 20
+ℹ pass 20
+ℹ fail 0
+ℹ cancelled 0
+ℹ todo 0
+ℹ duration_ms 52.537166
+```
+
+#### 三份 unit 合并回归
+
+命令：
+
+```text
+node --test tests/unit/protocol-normalizer.test.mjs tests/unit/workspace-guard.test.mjs tests/unit/terminal-result.test.mjs
+```
+
+完整输出：
+
+```text
+✔ normalizeEvent returns a bounded public projection without internal ids (0.770375ms)
+✔ normalizeEvent supports vendor EventStore params.turn, params.item and params.diff (0.17925ms)
+✔ ordinary error and item completion are not terminal events (0.148625ms)
+✔ changed files come only from the current turn structured record (0.112791ms)
+✔ history adapter exposes turn-scoped history and never queries repository git state (0.208417ms)
+✔ publicProjection recursively removes internal protocol fields (0.084458ms)
+✔ supervisor adapter defines the complete fake contract and maps operations (0.412167ms)
+✔ supervisor adapter bridges events from an injected EventStore (0.085125ms)
+✔ supervisor adapter emits one thread-scoped terminal event per active process failure (0.851125ms)
+✔ fake adapter rejects invalid or unknown injected implementations (0.233583ms)
+✔ TerminalResult completed payload is bounded and strips internal fields (0.663292ms)
+✔ TerminalResult failed and interrupted payloads preserve safe terminal details (0.396208ms)
+✔ TerminalResult omits invalid duration values (0.069583ms)
+✔ TerminalResult rejects non-terminal status (0.14725ms)
+✔ TerminalResult requires verified turn provenance and a non-empty thread id (0.106791ms)
+✔ ModelService resolves default and explicit model/effort pairs (0.294333ms)
+✔ WorkspaceGuard.resolve returns the canonical realpath (1.680625ms)
+✔ WorkspaceGuard.resolve rejects a missing workspace (0.461ms)
+✔ WorkspaceGuard.assertThreadWorkspace fails closed for missing metadata and cross-workspace threads (1.035583ms)
+ℹ tests 19
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ todo 0
+ℹ duration_ms 42.825542
+```
+
+#### 静态检查与 smoke
+
+命令：
+
+```text
+git diff --check
+for file in src/adapters/supervisor/protocol-normalizer.mjs src/adapters/supervisor/app-server-adapter.mjs src/core/terminal-result.mjs tests/unit/protocol-normalizer.test.mjs tests/unit/terminal-result.test.mjs; do node --check "$file"; done
+npm run lint
+npm run smoke
+```
+
+结果：`git diff --check`、5 个相关文件 `node --check`、`npm run lint` 均退出码 `0` 且无错误输出；`npm run smoke` 输出 CLI help、四个命令 `serve/mcp/hook/drain`，默认模型 `gpt-5.6-luna`、默认 effort `xhigh`，退出码 `0`。
+
+### Fix round 2 concerns
+
+- 仍未启动真实 Codex app-server；真实进程失败通知的 wire 形状、多个 active thread 的生命周期和 `durationSec` 来源仍需后续 integration/E2E 验证。
+- 本轮只修复 Task 2 review findings，没有实现 SQLite、Runtime、MCP、Hook、recovery 或真实 ZCode 路径；这些仍属于后续任务边界。
+- 实现与本报告追加均已完成，未 push、发布或修改工作区外状态。
