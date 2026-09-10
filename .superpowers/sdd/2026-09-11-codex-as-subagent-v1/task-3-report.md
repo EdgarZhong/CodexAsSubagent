@@ -531,3 +531,151 @@ node --check src/core/completion-router.mjs
 - 工作范围未扩展到其他任务；未修改 SQLite 实现、Runtime、Server、MCP、Hook、package 或核心项目文档。
 - 仍未启动真实 Codex app-server，也未执行跨进程 Host Hook E2E；真实进程生命周期和 Host transport 由后续 Runtime/Hook 任务验证。
 - `internalTurnId` 与 `verifiedTurnIdentity` 依赖 adapter 归一化对象的不可枚举属性；任何绕过 Adapter 直接构造 Core event 的调用方仍必须显式提供合法 terminal type、身份和 verified recovery/canonical provenance，缺失时 fail closed。
+
+## Fix round 3：status/identity provenance review finding 修复
+
+- 修复 commit：`adfb1fd`。
+- 本轮未创建子 Agent；仅修改 Task 2 protocol normalizer、Task 3 CompletionRouter 及两组对应 unit tests。
+- 未修改其他任务或文件。
+
+### Finding 对应修复
+
+1. normalizer 现在收集 `event.type`、event/params/turn/turnRecord/currentTurn/item/diff 中的 status、reason 和 terminalStatus 来源，并把来源名及归一化结果保存到不可枚举 `internalStatusSources`。只有明确 terminal type 且所有 status 来源均与 type 期望值一致时才输出 public terminal status；`running`、unknown、冲突 status 和 identity 未验证时不输出 status，并设置 `verifiedTerminalStatus = false`。
+2. normalizer 收集 event、params.turn、turnRecord、currentTurn、turn.thread 以及 item.turn 等 thread/turn identity；一致时提供不可枚举 identity source 与 verified marker，冲突时 identity marker 为 false，terminal status 同时被抑制。`internalTurnId` 仅在 turn identity 验证成功时存在，不进入 `Object.keys`、`JSON.stringify` 或 `publicProjection`。
+3. Router 重新汇总 public event、hidden identity/status sources、嵌套 event/params records、supplied TerminalResult payload 和 active execution identity；任何 source 冲突、未知 status、active execution identity/status 异常、缺失 active event turn identity 都返回 null，不插入 completion、不删除 execution。合法 completed/failed/interrupted、verified canonical 和 recovery 路径保持可用；process failure 继续按 thread-scoped adapter event 路径处理。
+4. 新增回归覆盖：`turn.completed + turn.status=failed`、`turn.failed + nested completed`、unknown `running`、`event.threadId` 与 `turn.thread.id` 冲突、`turnRecord.id` 与 `internalTurnId` 冲突、canonical `item.completed` bypass，以及合法 failed/interrupted terminal。
+
+### Fix round 3 测试命令与完整输出
+
+#### Task 3 focused：`node --test tests/unit/sqlite-store.test.mjs tests/unit/completion-router.test.mjs`
+
+```text
+✔ CompletionRouter persists terminal result first and ignores non-terminal events (5.959458ms)
+✔ CompletionRouter accepts normalized terminal events and preserves their safe turn changes (2.603416ms)
+✔ CompletionRouter accepts valid failed and interrupted terminal events (2.731334ms)
+✔ CompletionRouter accepts an already-built verified recovery TerminalResult (2.181083ms)
+✔ CompletionRouter only accepts verified terminal types and matching identities (2.098375ms)
+✔ CompletionRouter rejects nested status and identity conflicts (1.89225ms)
+✔ CompletionRouter preserves truncated normalized change metadata (2.775875ms)
+✔ CompletionRouter routes a reserved direct terminal result without holding a delivery lock (2.406125ms)
+✔ SqliteStore creates the durable schema and required SQLite pragmas (4.177084ms)
+✔ terminal completion commits before delivery and duplicate thread/turn is idempotent (4.123625ms)
+✔ direct reservation uses compare-and-set, ACK is required, and expired leases requeue (4.682333ms)
+✔ two racing Hook Workers can claim a pending completion only once (26.367417ms)
+✔ SqliteStore rejects payload identity and status conflicts (2.253375ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 82.646042
+```
+
+退出码：`0`。
+
+#### Task 2 normalizer focused：`node --test tests/unit/protocol-normalizer.test.mjs`
+
+```text
+✔ normalizeEvent returns a bounded public projection without internal ids (0.9655ms)
+✔ normalizeEvent rejects conflicting thread and turn identities (0.125416ms)
+✔ normalizeEvent preserves terminal status provenance and rejects status conflicts (0.291916ms)
+✔ normalizeEvent rejects nested thread and turn identity conflicts as non-terminal (0.105208ms)
+✔ normalizeEvent supports vendor EventStore params.turn, params.item and params.diff (0.168667ms)
+✔ ordinary error and item completion are not terminal events (0.153625ms)
+✔ changed files come only from the current turn structured record (0.343542ms)
+✔ history adapter exposes turn-scoped history and never queries repository git state (0.194084ms)
+✔ publicProjection recursively removes internal protocol fields (0.056ms)
+✔ supervisor adapter defines the complete fake contract and maps operations (0.405542ms)
+✔ supervisor adapter bridges events from an injected EventStore (0.104958ms)
+✔ supervisor adapter emits one thread-scoped terminal event per active process failure (0.717917ms)
+✔ fake adapter rejects invalid or unknown injected implementations (0.183625ms)
+ℹ tests 13
+ℹ suites 0
+ℹ pass 13
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 44.989208
+```
+
+退出码：`0`。
+
+#### 全量回归：`npm test`
+
+```text
+> codex-as-subagent@0.1.0 test
+> node --test 'tests/**/*.test.mjs'
+
+✔ CompletionRouter persists terminal result first and ignores non-terminal events (7.364917ms)
+✔ CompletionRouter accepts normalized terminal events and preserves their safe turn changes (4.077167ms)
+✔ CompletionRouter accepts valid failed and interrupted terminal events (3.196458ms)
+✔ CompletionRouter accepts an already-built verified recovery TerminalResult (1.973084ms)
+✔ CompletionRouter only accepts verified terminal types and matching identities (2.252042ms)
+✔ CompletionRouter rejects nested status and identity conflicts (1.944792ms)
+✔ CompletionRouter preserves truncated normalized change metadata (2.65725ms)
+✔ CompletionRouter routes a reserved direct terminal result without holding a delivery lock (2.166792ms)
+✔ project layout exposes the V1 foundation (2.687417ms)
+✔ normalizeEvent returns a bounded public projection without internal ids (1.042959ms)
+✔ normalizeEvent rejects conflicting thread and turn identities (0.174125ms)
+✔ normalizeEvent preserves terminal status provenance and rejects status conflicts (0.583417ms)
+✔ normalizeEvent rejects nested thread and turn identity conflicts as non-terminal (0.142583ms)
+✔ normalizeEvent supports vendor EventStore params.turn, params.item and params.diff (0.207792ms)
+✔ ordinary error and item completion are not terminal events (0.61175ms)
+✔ changed files come only from the current turn structured record (0.149166ms)
+✔ history adapter exposes turn-scoped history and never queries repository git state (0.241333ms)
+✔ publicProjection recursively removes internal protocol fields (0.071667ms)
+✔ supervisor adapter defines the complete fake contract and maps operations (0.455541ms)
+✔ supervisor adapter bridges events from an injected EventStore (0.10725ms)
+✔ supervisor adapter emits one thread-scoped terminal event per active process failure (0.841917ms)
+✔ fake adapter rejects invalid or unknown injected implementations (0.238542ms)
+✔ SqliteStore creates the durable schema and required SQLite pragmas (4.363292ms)
+✔ terminal completion commits before delivery and duplicate thread/turn is idempotent (6.301625ms)
+✔ direct reservation uses compare-and-set, ACK is required, and expired leases requeue (5.072375ms)
+✔ two racing Hook Workers can claim a pending completion only once (26.748834ms)
+✔ SqliteStore rejects payload identity and status conflicts (2.169417ms)
+✔ TerminalResult completed payload is bounded and strips internal fields (1.60375ms)
+✔ TerminalResult failed and interrupted payloads preserve safe terminal details (0.882666ms)
+✔ TerminalResult omits invalid duration values (0.149292ms)
+✔ TerminalResult rejects non-terminal status (0.363417ms)
+✔ TerminalResult requires verified turn provenance and a non-empty thread id (0.224834ms)
+✔ ModelService resolves default and explicit model/effort pairs (0.712666ms)
+✔ WorkspaceGuard.resolve returns the canonical realpath (2.8455ms)
+✔ WorkspaceGuard.resolve rejects a missing workspace (0.689291ms)
+✔ WorkspaceGuard.assertThreadWorkspace fails closed for missing metadata and cross-workspace threads (1.3455ms)
+ℹ tests 36
+ℹ suites 0
+ℹ pass 36
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 120.716375
+```
+
+退出码：`0`。
+
+#### 其他检查
+
+```text
+命令：npm run lint
+结果：退出码 0；node --check src/cli/main.mjs 无错误。
+
+命令：npm run smoke
+结果：退出码 0；CLI --help 正常输出 serve、mcp、hook、drain 入口。
+
+命令：node --check src/adapters/supervisor/protocol-normalizer.mjs
+命令：node --check src/core/completion-router.mjs
+结果：两个命令均退出码 0，无输出。
+
+命令：git diff --check
+结果：退出码 0，无输出。
+```
+
+### Fix round 3 最终状态与 concerns
+
+- 实现 commit：`adfb1fd`；本节报告随后作为独立文档 commit 提交。
+- 仍未启动真实 Codex app-server，未执行跨进程 Host Hook E2E；这属于后续 Runtime/Hook 验收范围。
+- status provenance hidden fields 只在 Adapter normalized object 内部使用；绕过 Adapter 的调用仍必须提供完整、互相一致的 terminal type、identity、status 和可信 provenance，否则 Router fail closed。
