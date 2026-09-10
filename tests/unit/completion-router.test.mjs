@@ -310,11 +310,201 @@ test('CompletionRouter rejects nested status and identity conflicts', async (t) 
       internalTurnId: turnId,
       turnRecord: { id: 'other-turn', status: 'completed' },
     },
+    {
+      type: 'turn.completed',
+      status: 'completed',
+      threadId,
+      turnId,
+      params: {
+        item: { turn: { id: turnId, status: 'failed' } },
+      },
+    },
+    {
+      type: 'turn.completed',
+      status: 'completed',
+      threadId,
+      turnId,
+      params: {
+        diff: { turn: { id: turnId, status: 'running' } },
+      },
+    },
+    {
+      type: 'turn.completed',
+      status: 'completed',
+      threadId,
+      turnId,
+      params: {
+        diff: {
+          turn: {
+            id: turnId,
+            thread: { id: 'other-thread' },
+            status: 'completed',
+          },
+        },
+      },
+    },
+    {
+      type: 'turn.completed',
+      status: 'completed',
+      threadId,
+      turnId,
+      params: {
+        item: {
+          turn: {
+            id: turnId,
+            status: 'completed',
+            currentTurn: { id: 'other-turn', status: 'completed' },
+          },
+        },
+      },
+    },
   ]) {
     assert.equal(router.onTerminal(event), null);
   }
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
   assert.notEqual(executions.getExecution(threadId), null);
+});
+
+test('CompletionRouter rejects nested supplied-result status and identity conflicts', async (t) => {
+  const { store, executions, router } = await setup(t);
+  const workspace = '/workspace/router-result-evidence';
+  const cases = [
+    {
+      threadId: 'thread-result-turn-status',
+      turnId: 'turn-result-turn-status',
+      key: 'terminalResult',
+      payload: {
+        status: 'completed',
+        turn: { status: 'failed' },
+      },
+    },
+    {
+      threadId: 'thread-result-record-status',
+      turnId: 'turn-result-record-status',
+      key: 'result',
+      payload: {
+        status: 'completed',
+        turnRecord: { status: 'running' },
+      },
+    },
+    {
+      threadId: 'thread-result-current-status',
+      turnId: 'turn-result-current-status',
+      key: 'terminalResult',
+      payload: {
+        status: 'completed',
+        currentTurn: { status: 'unknown' },
+      },
+    },
+    {
+      threadId: 'thread-result-deep-identity',
+      turnId: 'turn-result-deep-identity',
+      key: 'terminalResult',
+      payload: {
+        status: 'completed',
+        turn: {
+          currentTurn: { id: 'other-turn', status: 'completed' },
+        },
+      },
+    },
+  ];
+
+  for (const entry of cases) {
+    executions.createExecution({
+      threadId: entry.threadId,
+      turnId: entry.turnId,
+      workspace,
+      ownerInstanceId: 'router-instance',
+    });
+    const payload = {
+      threadId: entry.threadId,
+      turnId: entry.turnId,
+      changes: { files: [] },
+      ...entry.payload,
+    };
+    assert.equal(router.onTerminal({
+      type: 'turn.completed',
+      status: 'completed',
+      threadId: entry.threadId,
+      turnId: entry.turnId,
+      [entry.key]: payload,
+    }), null);
+  }
+
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+  assert.ok(cases.every(({ threadId }) => executions.getExecution(threadId) !== null));
+});
+
+test('CompletionRouter rejects conflicting nested active-execution evidence', async (t) => {
+  const { store, executions, router } = await setup(t);
+  const workspace = '/workspace/router-execution-evidence';
+  const cases = [
+    {
+      threadId: 'thread-execution-current-id',
+      turnId: 'turn-execution-current-id',
+      evidence: {
+        currentTurn: { id: 'other-turn', status: 'running' },
+      },
+    },
+    {
+      threadId: 'thread-execution-thread-id',
+      turnId: 'turn-execution-thread-id',
+      evidence: {
+        turn: {
+          id: 'turn-execution-thread-id',
+          thread: { id: 'other-thread' },
+          status: 'running',
+        },
+      },
+    },
+    {
+      threadId: 'thread-execution-terminal-status',
+      turnId: 'turn-execution-terminal-status',
+      evidence: {
+        currentTurn: { id: 'turn-execution-terminal-status', status: 'failed' },
+      },
+    },
+    {
+      threadId: 'thread-execution-deep-status',
+      turnId: 'turn-execution-deep-status',
+      evidence: {
+        turn: {
+          id: 'turn-execution-deep-status',
+          status: 'running',
+          currentTurn: { id: 'turn-execution-deep-status', status: 'unknown' },
+        },
+      },
+    },
+  ];
+  for (const entry of cases) {
+    executions.createExecution({
+      threadId: entry.threadId,
+      turnId: entry.turnId,
+      workspace,
+      ownerInstanceId: 'router-instance',
+    });
+  }
+
+  const getExecution = router.executions.getExecution.bind(router.executions);
+  const evidenceByThread = new Map(cases.map((entry) => [entry.threadId, entry.evidence]));
+  router.executions.getExecution = (threadOrOptions, turnId) => {
+    const execution = getExecution(threadOrOptions, turnId);
+    return execution
+      ? { ...execution, ...evidenceByThread.get(execution.threadId) }
+      : null;
+  };
+
+  for (const entry of cases) {
+    assert.equal(router.onTerminal({
+      type: 'turn.completed',
+      status: 'completed',
+      threadId: entry.threadId,
+      turnId: entry.turnId,
+    }), null);
+  }
+
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+  assert.ok(cases.every(({ threadId }) => executions.getExecution(threadId) !== null));
 });
 
 test('CompletionRouter preserves truncated normalized change metadata', async (t) => {

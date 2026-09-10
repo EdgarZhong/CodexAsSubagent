@@ -40,6 +40,87 @@ function trustedRecovery(event, suppliedResult) {
     && suppliedResult instanceof TerminalResult;
 }
 
+const TURN_EVIDENCE_KEYS = Object.freeze(['turn', 'turnRecord', 'currentTurn']);
+const STATUS_EVIDENCE_FIELDS = Object.freeze(['status', 'reason', 'terminalStatus', 'terminal_status']);
+
+function collectTurnEvidenceRecords(value, prefix) {
+  if (!isRecord(value)) return [];
+  const roots = [{ source: prefix, value, isTurnRecord: false }];
+  for (const key of ['item', 'diff']) {
+    if (isRecord(value[key])) {
+      roots.push({ source: `${prefix}.${key}`, value: value[key], isTurnRecord: false });
+    }
+  }
+  if (isRecord(value.params)) {
+    roots.push({ source: `${prefix}.params`, value: value.params, isTurnRecord: false });
+    for (const key of ['item', 'diff']) {
+      if (isRecord(value.params[key])) {
+        roots.push({
+          source: `${prefix}.params.${key}`,
+          value: value.params[key],
+          isTurnRecord: false,
+        });
+      }
+    }
+  }
+
+  const evidence = [];
+  for (const root of roots) {
+    const pending = [root];
+    const seen = new WeakSet();
+    while (pending.length > 0) {
+      const current = pending.shift();
+      if (seen.has(current.value)) continue;
+      seen.add(current.value);
+      evidence.push(current);
+      for (const key of TURN_EVIDENCE_KEYS) {
+        const child = current.value[key];
+        if (isRecord(child)) {
+          pending.push({
+            source: `${current.source}.${key}`,
+            value: child,
+            isTurnRecord: true,
+          });
+        }
+      }
+    }
+  }
+  return evidence;
+}
+
+function ownValues(values, evidence, fields) {
+  for (const field of fields) {
+    if (Object.hasOwn(evidence.value, field)) values.push(evidence.value[field]);
+  }
+}
+
+function threadIdentityValues(evidenceRecords) {
+  const values = [];
+  for (const evidence of evidenceRecords) {
+    ownValues(values, evidence, ['threadId', 'thread_id']);
+    if (isRecord(evidence.value.thread)) {
+      ownValues(values, { value: evidence.value.thread }, ['id', 'threadId', 'thread_id']);
+    }
+  }
+  return values;
+}
+
+function turnIdentityValues(evidenceRecords) {
+  const values = [];
+  for (const evidence of evidenceRecords) {
+    ownValues(values, evidence, ['turnId', 'turn_id', 'internalTurnId']);
+    if (evidence.isTurnRecord) ownValues(values, evidence, ['id']);
+  }
+  return values;
+}
+
+function statusEvidenceValues(evidenceRecords, extraFields = []) {
+  const values = [];
+  const fields = [...STATUS_EVIDENCE_FIELDS, ...extraFields];
+  for (const evidence of evidenceRecords) ownValues(values, evidence, fields);
+  return values;
+}
+
 function collectIdentityValues(values) {
   const identities = [];
   for (const value of values) {
@@ -109,51 +190,25 @@ function statusToken(value) {
 }
 
 function activeExecutionStatusIsConsistent(execution) {
-  const values = [
-    execution?.status,
-    execution?.executionStatus,
-    execution?.turn?.status,
-    execution?.turnRecord?.status,
-  ].filter((value) => value !== undefined);
+  const values = statusEvidenceValues(
+    collectTurnEvidenceRecords(execution, 'execution'),
+    ['executionStatus'],
+  );
   return values.every((value) => (
     !normalizeTerminalStatus(value) && ACTIVE_EXECUTION_STATUS_TOKENS.has(statusToken(value))
   ));
 }
 
-function terminalStatus(event, suppliedPayloads, suppliedResult) {
+function terminalStatus(event, eventEvidence, resultEvidence, suppliedResult) {
   const hiddenStatuses = hiddenStatusValues(event);
   if (event.internalStatusSources !== undefined
     && (!verifiedMarkerMatches(event, 'verifiedTerminalStatus', hiddenStatuses))) return null;
   if (event.verifiedTerminalStatus !== undefined && event.verifiedTerminalStatus !== true) return null;
   const verifiedTypeStatus = VERIFIED_TERMINAL_TYPES.get(eventType(event));
-  const payloadStatuses = suppliedPayloads.flatMap((payload) => [payload?.status, payload?.terminalStatus]);
   const statuses = collectStatusValues([
-    event.status,
-    event.reason,
-    event.terminalStatus,
-    event.turn?.status,
-    event.turn?.reason,
-    event.turn?.terminalStatus,
-    event.turnRecord?.status,
-    event.turnRecord?.reason,
-    event.turnRecord?.terminalStatus,
-    event.currentTurn?.status,
-    event.currentTurn?.reason,
-    event.currentTurn?.terminalStatus,
-    event.params?.status,
-    event.params?.reason,
-    event.params?.terminalStatus,
-    event.params?.turn?.status,
-    event.params?.turn?.reason,
-    event.params?.turn?.terminalStatus,
-    event.params?.turnRecord?.status,
-    event.params?.turnRecord?.reason,
-    event.params?.turnRecord?.terminalStatus,
-    event.params?.currentTurn?.status,
-    event.params?.currentTurn?.reason,
-    event.params?.currentTurn?.terminalStatus,
+    ...statusEvidenceValues(eventEvidence),
     ...(hiddenStatuses ?? []),
-    ...payloadStatuses,
+    ...statusEvidenceValues(resultEvidence),
   ]);
   if (verifiedTypeStatus) {
     return statusMatches(statuses, verifiedTypeStatus) ? verifiedTypeStatus : null;
@@ -207,7 +262,11 @@ export class CompletionRouter {
     if (suppliedPayloads.some((payload) => payload === null)) return null;
     const suppliedResult = suppliedResults[0] ?? null;
     const suppliedPayload = suppliedPayloads[0] ?? null;
-    const status = terminalStatus(event, suppliedPayloads, suppliedResult);
+    const eventEvidence = collectTurnEvidenceRecords(event, 'event');
+    const resultEvidence = suppliedPayloads.flatMap((payload, index) => (
+      collectTurnEvidenceRecords(payload, `result[${index}]`)
+    ));
+    const status = terminalStatus(event, eventEvidence, resultEvidence, suppliedResult);
     if (!status) return null;
     if (suppliedResults.length > 0 && suppliedPayloads.some((payload) => !payload?.status)) return null;
 
@@ -216,61 +275,10 @@ export class CompletionRouter {
     if (!verifiedMarkerMatches(event, 'verifiedThreadIdentity', hiddenThreadIds)
       || !verifiedMarkerMatches(event, 'verifiedTurnIdentity', hiddenTurnIds)) return null;
     const eventThreadIds = collectIdentityValues([
-      event.threadId,
-      event.thread?.id,
-      event.thread?.threadId,
-      event.turn?.threadId,
-      event.turn?.thread_id,
-      event.turn?.thread?.id,
-      event.turn?.thread?.threadId,
-      event.turnRecord?.threadId,
-      event.turnRecord?.thread_id,
-      event.turnRecord?.thread?.id,
-      event.turnRecord?.thread?.threadId,
-      event.currentTurn?.threadId,
-      event.currentTurn?.thread_id,
-      event.currentTurn?.thread?.id,
-      event.currentTurn?.thread?.threadId,
-      event.params?.threadId,
-      event.params?.thread?.id,
-      event.params?.thread?.threadId,
-      event.params?.turn?.threadId,
-      event.params?.turn?.thread_id,
-      event.params?.turn?.thread?.id,
-      event.params?.turn?.thread?.threadId,
-      event.params?.turnRecord?.threadId,
-      event.params?.turnRecord?.thread_id,
-      event.params?.turnRecord?.thread?.id,
-      event.params?.turnRecord?.thread?.threadId,
-      event.params?.currentTurn?.threadId,
-      event.params?.currentTurn?.thread_id,
-      event.params?.currentTurn?.thread?.id,
-      event.params?.currentTurn?.thread?.threadId,
-      event.params?.item?.threadId,
-      event.params?.item?.thread?.id,
-      event.params?.item?.thread?.threadId,
-      event.params?.item?.turn?.threadId,
-      event.params?.item?.turn?.thread_id,
-      event.params?.item?.turn?.thread?.id,
-      event.params?.item?.turn?.thread?.threadId,
+      ...threadIdentityValues(eventEvidence),
       ...(hiddenThreadIds ?? []),
     ]);
-    const resultThreadIds = collectIdentityValues(suppliedPayloads.flatMap((payload) => [
-      payload?.threadId,
-      payload?.thread?.id,
-      payload?.thread?.threadId,
-      payload?.turn?.threadId,
-      payload?.turn?.thread_id,
-      payload?.turn?.thread?.id,
-      payload?.turn?.thread?.threadId,
-      payload?.turnRecord?.threadId,
-      payload?.turnRecord?.thread_id,
-      payload?.turnRecord?.thread?.id,
-      payload?.currentTurn?.threadId,
-      payload?.currentTurn?.thread_id,
-      payload?.currentTurn?.thread?.id,
-      payload?.currentTurn?.thread?.threadId,
-    ]));
+    const resultThreadIds = collectIdentityValues(threadIdentityValues(resultEvidence));
     if (!consistentIdentity(eventThreadIds)
       || !consistentIdentity(resultThreadIds)
       || !consistentIdentity([...eventThreadIds, ...resultThreadIds])) return null;
@@ -282,69 +290,23 @@ export class CompletionRouter {
     if (knownExecution && !activeExecutionStatusIsConsistent(knownExecution)) return null;
     if (event.verifiedTurnIdentity !== undefined && event.verifiedTurnIdentity !== true) return null;
     const eventTurnIds = collectIdentityValues([
-      event.turnId,
-      event.internalTurnId,
-      event.turn?.id,
-      event.turn?.turnId,
-      event.turn?.internalTurnId,
-      event.turnRecord?.id,
-      event.turnRecord?.turnId,
-      event.turnRecord?.internalTurnId,
-      event.currentTurn?.id,
-      event.currentTurn?.turnId,
-      event.currentTurn?.internalTurnId,
-      event.params?.turnId,
-      event.params?.turn?.id,
-      event.params?.turn?.turnId,
-      event.params?.turn?.internalTurnId,
-      event.params?.turnRecord?.id,
-      event.params?.turnRecord?.turnId,
-      event.params?.turnRecord?.internalTurnId,
-      event.params?.currentTurn?.id,
-      event.params?.currentTurn?.turnId,
-      event.params?.currentTurn?.internalTurnId,
-      event.params?.item?.turnId,
-      event.params?.item?.turn?.id,
-      event.params?.item?.turn?.turnId,
-      event.params?.item?.internalTurnId,
-      event.params?.diff?.turnId,
-      event.params?.diff?.turn?.id,
+      ...turnIdentityValues(eventEvidence),
       ...(hiddenTurnIds ?? []),
     ]);
-    const resultTurnIds = collectIdentityValues(suppliedPayloads.flatMap((payload) => [
-      payload?.turnId,
-      payload?.internalTurnId,
-      payload?.turn?.id,
-      payload?.turn?.turnId,
-      payload?.turn?.internalTurnId,
-      payload?.turnRecord?.id,
-      payload?.turnRecord?.turnId,
-      payload?.turnRecord?.internalTurnId,
-      payload?.currentTurn?.id,
-      payload?.currentTurn?.turnId,
-      payload?.currentTurn?.internalTurnId,
-    ]));
+    const resultTurnIds = collectIdentityValues(turnIdentityValues(resultEvidence));
     if (!consistentIdentity(eventTurnIds) || !consistentIdentity(resultTurnIds)) return null;
     const turnIds = [...eventTurnIds, ...resultTurnIds];
     if (!consistentIdentity(turnIds)) return null;
     const eventTurnId = firstString(...eventTurnIds);
     const resultTurnId = firstString(...resultTurnIds);
-    const executionThreadIds = collectIdentityValues([
-      knownExecution?.threadId,
-      knownExecution?.thread?.id,
-    ]);
-    const executionTurnIds = collectIdentityValues([
-      knownExecution?.turnId,
-      knownExecution?.turn?.id,
-      knownExecution?.turn?.turnId,
-      knownExecution?.turnRecord?.id,
-      knownExecution?.turnRecord?.turnId,
-    ]);
+    const executionEvidence = collectTurnEvidenceRecords(knownExecution, 'execution');
+    const executionThreadIds = collectIdentityValues(threadIdentityValues(executionEvidence));
+    const executionTurnIds = collectIdentityValues(turnIdentityValues(executionEvidence));
     if (knownExecution && (
       !consistentIdentity(executionThreadIds)
       || !consistentIdentity(executionTurnIds)
-      || !consistentIdentity([...eventThreadIds, ...executionThreadIds])
-      || !consistentIdentity([...eventTurnIds, ...executionTurnIds])
+      || !consistentIdentity([...eventThreadIds, ...resultThreadIds, ...executionThreadIds])
+      || !consistentIdentity([...eventTurnIds, ...resultTurnIds, ...executionTurnIds])
     )) return null;
     if (knownExecution && (!eventTurnId || eventTurnId !== firstString(...executionTurnIds))) return null;
     if (knownExecution && event.workspace !== undefined && event.workspace !== knownExecution.workspace) return null;

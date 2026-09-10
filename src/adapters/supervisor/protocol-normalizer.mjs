@@ -26,39 +26,70 @@ function eventParams(event) {
   return isRecord(event?.params) ? event.params : {};
 }
 
-function threadIdentityCandidates(event) {
+const TURN_EVIDENCE_KEYS = Object.freeze(['turn', 'turnRecord', 'currentTurn']);
+const STATUS_EVIDENCE_FIELDS = Object.freeze(['status', 'reason', 'terminalStatus', 'terminal_status']);
+
+function collectTurnEvidenceRecords(roots) {
+  const evidence = [];
+  for (const root of roots) {
+    if (!isRecord(root.value)) continue;
+    const pending = [root];
+    const seen = new WeakSet();
+    while (pending.length > 0) {
+      const current = pending.shift();
+      if (seen.has(current.value)) continue;
+      seen.add(current.value);
+      evidence.push(current);
+      for (const key of TURN_EVIDENCE_KEYS) {
+        const child = current.value[key];
+        if (isRecord(child)) {
+          pending.push({
+            source: `${current.source}.${key}`,
+            value: child,
+            isTurnRecord: true,
+          });
+        }
+      }
+    }
+  }
+  return evidence;
+}
+
+function eventEvidenceRecords(event) {
   const params = eventParams(event);
-  return [
-    { source: 'event.threadId', value: event?.threadId },
-    { source: 'event.thread.id', value: event?.thread?.id },
-    { source: 'event.thread.threadId', value: event?.thread?.threadId },
-    { source: 'event.turn.threadId', value: event?.turn?.threadId },
-    { source: 'event.turn.thread_id', value: event?.turn?.thread_id },
-    { source: 'event.turn.thread.id', value: event?.turn?.thread?.id },
-    { source: 'event.turnRecord.threadId', value: event?.turnRecord?.threadId },
-    { source: 'event.turnRecord.thread_id', value: event?.turnRecord?.thread_id },
-    { source: 'event.turnRecord.thread.id', value: event?.turnRecord?.thread?.id },
-    { source: 'event.currentTurn.threadId', value: event?.currentTurn?.threadId },
-    { source: 'event.currentTurn.thread_id', value: event?.currentTurn?.thread_id },
-    { source: 'event.currentTurn.thread.id', value: event?.currentTurn?.thread?.id },
-    { source: 'params.threadId', value: params.threadId },
-    { source: 'params.thread.id', value: params.thread?.id },
-    { source: 'params.thread.threadId', value: params.thread?.threadId },
-    { source: 'params.turn.threadId', value: params.turn?.threadId },
-    { source: 'params.turn.thread_id', value: params.turn?.thread_id },
-    { source: 'params.turn.thread.id', value: params.turn?.thread?.id },
-    { source: 'params.turnRecord.threadId', value: params.turnRecord?.threadId },
-    { source: 'params.turnRecord.thread_id', value: params.turnRecord?.thread_id },
-    { source: 'params.turnRecord.thread.id', value: params.turnRecord?.thread?.id },
-    { source: 'params.currentTurn.threadId', value: params.currentTurn?.threadId },
-    { source: 'params.currentTurn.thread_id', value: params.currentTurn?.thread_id },
-    { source: 'params.currentTurn.thread.id', value: params.currentTurn?.thread?.id },
-    { source: 'params.item.threadId', value: params.item?.threadId },
-    { source: 'params.item.thread.id', value: params.item?.thread?.id },
-    { source: 'params.item.turn.threadId', value: params.item?.turn?.threadId },
-    { source: 'params.item.turn.thread_id', value: params.item?.turn?.thread_id },
-    { source: 'params.item.turn.thread.id', value: params.item?.turn?.thread?.id },
-  ];
+  return collectTurnEvidenceRecords([
+    { source: 'event', value: event, isTurnRecord: false },
+    { source: 'event.item', value: event?.item, isTurnRecord: false },
+    { source: 'event.diff', value: event?.diff, isTurnRecord: false },
+    { source: 'params', value: params, isTurnRecord: false },
+    { source: 'params.item', value: params.item, isTurnRecord: false },
+    { source: 'params.diff', value: params.diff, isTurnRecord: false },
+  ]);
+}
+
+function ownCandidates(candidates, evidence, fields) {
+  for (const field of fields) {
+    if (Object.hasOwn(evidence.value, field)) {
+      candidates.push({
+        source: `${evidence.source}.${field}`,
+        value: evidence.value[field],
+      });
+    }
+  }
+}
+
+function threadIdentityCandidates(event) {
+  const candidates = [];
+  for (const evidence of eventEvidenceRecords(event)) {
+    ownCandidates(candidates, evidence, ['threadId', 'thread_id']);
+    if (isRecord(evidence.value.thread)) {
+      ownCandidates(candidates, {
+        source: `${evidence.source}.thread`,
+        value: evidence.value.thread,
+      }, ['id', 'threadId', 'thread_id']);
+    }
+  }
+  return candidates;
 }
 
 function extractThreadId(event) {
@@ -66,36 +97,14 @@ function extractThreadId(event) {
 }
 
 function turnIdentityCandidates(event) {
-  const params = eventParams(event);
-  return [
-    { source: 'event.turnId', value: event?.turnId },
-    { source: 'event.internalTurnId', value: event?.internalTurnId },
-    { source: 'event.turn.id', value: event?.turn?.id },
-    { source: 'event.turn.turnId', value: event?.turn?.turnId },
-    { source: 'event.turn.internalTurnId', value: event?.turn?.internalTurnId },
-    { source: 'event.turnRecord.id', value: event?.turnRecord?.id },
-    { source: 'event.turnRecord.turnId', value: event?.turnRecord?.turnId },
-    { source: 'event.turnRecord.internalTurnId', value: event?.turnRecord?.internalTurnId },
-    { source: 'event.currentTurn.id', value: event?.currentTurn?.id },
-    { source: 'event.currentTurn.turnId', value: event?.currentTurn?.turnId },
-    { source: 'event.currentTurn.internalTurnId', value: event?.currentTurn?.internalTurnId },
-    { source: 'params.turnId', value: params.turnId },
-    { source: 'params.turn.internalTurnId', value: params.turn?.internalTurnId },
-    { source: 'params.turn.id', value: params.turn?.id },
-    { source: 'params.turn.turnId', value: params.turn?.turnId },
-    { source: 'params.turnRecord.id', value: params.turnRecord?.id },
-    { source: 'params.turnRecord.turnId', value: params.turnRecord?.turnId },
-    { source: 'params.turnRecord.internalTurnId', value: params.turnRecord?.internalTurnId },
-    { source: 'params.currentTurn.id', value: params.currentTurn?.id },
-    { source: 'params.currentTurn.turnId', value: params.currentTurn?.turnId },
-    { source: 'params.currentTurn.internalTurnId', value: params.currentTurn?.internalTurnId },
-    { source: 'params.item.turnId', value: params.item?.turnId },
-    { source: 'params.item.turn.id', value: params.item?.turn?.id },
-    { source: 'params.item.turn.turnId', value: params.item?.turn?.turnId },
-    { source: 'params.item.internalTurnId', value: params.item?.internalTurnId },
-    { source: 'params.diff.turnId', value: params.diff?.turnId },
-    { source: 'params.diff.turn.id', value: params.diff?.turn?.id },
-  ];
+  const candidates = [];
+  for (const evidence of eventEvidenceRecords(event)) {
+    ownCandidates(candidates, evidence, ['turnId', 'turn_id', 'internalTurnId']);
+    if (evidence.isTurnRecord) {
+      ownCandidates(candidates, evidence, ['id']);
+    }
+  }
+  return candidates;
 }
 
 function extractTurnId(event) {
@@ -296,27 +305,13 @@ const TERMINAL_EVENT_STATUSES = new Map([
 ]);
 
 function collectStatusSources(event) {
-  const params = eventParams(event);
-  const records = [
-    ['event', event],
-    ['event.turn', event?.turn],
-    ['event.turnRecord', event?.turnRecord],
-    ['event.currentTurn', event?.currentTurn],
-    ['params', params],
-    ['params.turn', params.turn],
-    ['params.turnRecord', params.turnRecord],
-    ['params.currentTurn', params.currentTurn],
-    ['params.item', params.item],
-    ['params.diff', params.diff],
-  ];
   const sources = [{ source: 'event.type', status: null }];
-  for (const [source, record] of records) {
-    if (!isRecord(record)) continue;
-    for (const field of ['status', 'reason', 'terminalStatus']) {
-      if (Object.hasOwn(record, field)) {
+  for (const evidence of eventEvidenceRecords(event)) {
+    for (const field of STATUS_EVIDENCE_FIELDS) {
+      if (Object.hasOwn(evidence.value, field)) {
         sources.push({
-          source: `${source}.${field}`,
-          status: normalizeTerminalStatus(record[field]),
+          source: `${evidence.source}.${field}`,
+          status: normalizeTerminalStatus(evidence.value[field]),
         });
       }
     }

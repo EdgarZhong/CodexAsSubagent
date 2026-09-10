@@ -126,6 +126,77 @@ test("normalizeEvent preserves terminal status provenance and rejects status con
   }
 });
 
+test("normalizeEvent fails closed for deep turn status and identity evidence", () => {
+  for (const { params, source } of [
+    {
+      params: {
+        item: {
+          turn: { id: "turn-deep", status: "failed" },
+        },
+      },
+      source: "params.item.turn.status",
+    },
+    {
+      params: {
+        diff: {
+          turn: { id: "turn-deep", status: "running" },
+        },
+      },
+      source: "params.diff.turn.status",
+    },
+    {
+      params: {
+        item: {
+          turn: {
+            id: "turn-deep",
+            currentTurn: { id: "turn-deep", status: "unknown" },
+          },
+        },
+      },
+      source: "params.item.turn.currentTurn.status",
+    },
+  ]) {
+    const event = normalizeEvent({
+      method: "turn/completed",
+      threadId: "thread-deep",
+      turnId: "turn-deep",
+      params,
+    });
+    assert.equal("status" in event, false);
+    assert.equal(event.verifiedTerminalStatus, false);
+    assert.ok(event.internalStatusSources.some((entry) => entry.source === source));
+    assert.equal(Object.keys(event).includes("internalStatusSources"), false);
+    assert.doesNotMatch(JSON.stringify(event), /internalStatusSources|unknown|running|failed/);
+    assert.doesNotMatch(JSON.stringify(publicProjection(event)), /internalStatusSources|unknown|running|failed/);
+  }
+
+  const identityConflict = normalizeEvent({
+    method: "turn/completed",
+    threadId: "thread-deep",
+    turnId: "turn-deep",
+    params: {
+      diff: {
+        turn: {
+          id: "turn-deep",
+          status: "completed",
+          currentTurn: {
+            id: "other-turn",
+            thread: { id: "other-thread" },
+            status: "completed",
+          },
+        },
+      },
+    },
+  });
+  assert.equal(identityConflict.threadId, null);
+  assert.equal(identityConflict.verifiedThreadIdentity, false);
+  assert.equal(identityConflict.verifiedTurnIdentity, false);
+  assert.equal(identityConflict.verifiedTerminalStatus, false);
+  assert.equal("internalTurnId" in identityConflict, false);
+  assert.equal("status" in identityConflict, false);
+  assert.doesNotMatch(JSON.stringify(identityConflict), /other-thread|other-turn/);
+});
+
 test("normalizeEvent rejects nested thread and turn identity conflicts as non-terminal", () => {
   const threadConflict = normalizeEvent({
     method: "turn/completed",
