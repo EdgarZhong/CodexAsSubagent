@@ -84,6 +84,15 @@ test('a render crash leaves the claimed lease for expiry-based recovery', async 
   assert.equal(state, 'pending');
 });
 
+test('renderer truncates UUID completion ids to the first segment but keeps custom ids', () => {
+  const uuid = '6bbf0b7e-baf1-449c-8205-d9a79ff5175b';
+  const truncated = renderCompletions([row(uuid)]);
+  assert.match(truncated, /\(6bbf0b7e\)/);
+  assert.doesNotMatch(truncated, /6bbf0b7e-baf1/);
+  const custom = renderCompletions([row('completion-1')]);
+  assert.match(custom, /\(completion-1\)/);
+});
+
 test('host wrappers remain isolated and stable completion ids remain visible', () => {
   const completions = [row('duplicate-id'), row('duplicate-id')];
   const outputs = availableHosts().map((host) => renderCompletions(completions, host));

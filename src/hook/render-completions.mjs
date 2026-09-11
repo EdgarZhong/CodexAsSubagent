@@ -24,13 +24,22 @@ function messageOf(payload) {
     : payload.lastAssistantMessage;
 }
 
+// completionId 仅用于交付去重与日志比对，模型可见接口只认 threadId。
+// UUID 形态的 id 截到第一段（8 位十六进制）足以区分，避免把内部主键整条外泄。
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function shortCompletionId(value) {
+  if (typeof value !== 'string' || value.length === 0) return '';
+  if (!UUID_PATTERN.test(value)) return value;
+  return value.slice(0, 8);
+}
+
 function renderOne(completion) {
   const payload = payloadOf(completion) || {};
   const threadId = typeof payload.threadId === 'string' ? payload.threadId : 'unknown-thread';
   const status = typeof payload.status === 'string' ? payload.status : 'unknown';
-  const completionId = typeof completion?.completionId === 'string'
-    ? ` (${completion.completionId})`
-    : '';
+  const shortId = shortCompletionId(completion?.completionId);
+  const completionId = shortId.length > 0 ? ` (${shortId})` : '';
   const lines = [`Codex subagent ${threadId} ${status}${completionId}`];
   const message = messageOf(payload);
   if (typeof message === 'string' && message.length > 0) lines.push(message);

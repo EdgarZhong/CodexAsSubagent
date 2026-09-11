@@ -1,0 +1,94 @@
+# 十工具真实 ZCode 会话 E2E 与中断协议裁决
+
+- 日期：2026-09-11 13:34–13:41（本地）
+- 执行：主 Agent 在已重启的 ZCode 会话内，直接调用 10 个 MCP 工具，不使用脚本模拟
+- 模型：`gpt-5.5` + `effort=medium`（按用户要求用最便宜模型、降低思考，不用 xhigh）
+- 环境：ZCode GUI 会话；MCP server 由 Host 拉起；Runtime Server 冷启动自动发现 `/Applications/ChatGPT.app/Contents/Resources/codex` 0.153.4
+- 结果：**10/10 工具通过**；注入为 PostToolUse **turn 中途自动回流**（非人工 `drain`）；发现并修复第 5 处缺陷；回归 112/112
+
+## 1. 十工具逐项
+
+| 工具 | 输入要点 | 返回结构（实测） | 判定 |
+| --- | --- | --- | --- |
+| `codex_models` | 无参 | `{default:{model:"gpt-5.6-luna",effort:"xhigh"},models:[{id,supportedEfforts}×5]}` | 通过 |
+| `codex_list_threads` | 无参 | `{threads:[{threadId}],total,truncated}` | 通过 |
+| `codex_spawn` | prompt/model/effort | `{threadId,status:"running",model,effort,startedAt}` | 通过 |
+| `codex_status` | threadId | `{threadId,status,model,effort,startedAt,lastActivityAt,idleForSec,latestAction,latestAssistantPreview,filesChanged}` | 通过 |
+| `codex_read_thread` | threadId | `{threadId,status,assistantMessages:[...],recentActivity:[{status}],changes:{files,filesChanged,filesTruncated},truncated}` | 通过 |
+| `codex_wait` | threadId | 活跃期等待返回 terminal result；已被 hook 消费时返回 `{code:"no_active_turn"}` | 通过（含互斥语义） |
+| `codex_wait_many` | threads:["...","..."] | `{completed:[{threadId,status,finalAssistantMessage,changes,error}],pending:[],timedOut:false}` | 通过 |
+| `codex_send` | threadId/prompt | `{threadId,status:"running",model,effort,startedAt}` | 通过 |
+| `codex_steer` | threadId/prompt | `{threadId,accepted:true,status:"running"}` | 通过（ACK 语义） |
+| `codex_interrupt` | threadId | `{threadId,interruptRequested:true,requestedAt}` | 通过（修复后落 interrupted） |
+
+## 2. Hook 自动注入实证（PostToolUse 中途回流）
+
+用户在 GUI 中看不到工具结果，故把注入原文贴回。实测抓到两次 turn 中途注入（均由 `PostToolUse` 触发，非本轮结束）：
+
+第一次（线程 A `POSTTOOLUSE-PROBE-A` 完成后，我在同一 turn 内继续调别的工具时被注入）：
+
+```
+[Hook additional context]
+#1
+Codex subagent 01a08ef5-969a-7fd0-9b8a-a076362c2fd4 completed (ed4c640d-6a62-48d1-94e1-7cbd1ba274da)
+POSTTOOLUSE-PROBE-A
+```
+
+第二次（线程 A 经 `codex_send` 的第二 turn 完成后）：
+
+```
+[Hook additional context]
+#1
+Codex subagent 01a08ef5-969a-7fd0-9b8a-a076362c2fd4 completed (6bbf0b7e-baf1-449c-8205-d9a79ff5175b)
+SEND-PROBE-OK
+```
+
+- 机制：Hook stdout 为严格 JSON `{"additionalContext":"..."}`；PostToolUse 事件**不带** `decision`（工具事件不接受 decision/continue），只把完成结果拼接到刚返回的工具结果尾部；`Stop` 事件才带 `decision:block` 续轮。
+- 关键结论：**不必等我这一轮结束**，子 agent 一完成，只要我下一步还有任何工具调用，结果就会在 turn 中途回流。
+
+## 3. 发现并修复的第 5 处缺陷（协议层，最隐蔽）
+
+### 现象
+
+`codex_interrupt` 返回 `accepted` 后，被中断线程永久停留 `running`：`codex_status` 一直 `running`、SQLite 无 terminal completion、Server 也不再 idle 退出（实测僵死 5 分钟）。
+
+### 根因
+
+裸 JSON-RPC 探针（直接对 codex app-server 发 `turn/interrupt`）抓到真实通知：
+
+```
+NOTIF: {"method":"turn/completed","params":{"threadId":"...","turn":{"id":"...","status":"interrupted","...":...}}}
+```
+
+`generate-json-schema` 佐证：**全 schema 只有 `TurnCompletedNotification`**，没有 `TurnFailedNotification` / `TurnInterruptedNotification`；终止状态在 `params.turn.status`（`TurnStatus = completed|interrupted|failed|inProgress`）。即上游把三种终止**复用一个通知**（这是设计预期，用户确认）。
+
+我们 `protocol-normalizer.mjs` 的 `terminalStatus()` 用**方法名**推期望状态（`turn.completed → completed`），于是 `turn/completed` + `status=interrupted` 被判为"状态冲突"→ `verifiedTerminalStatus=false` → 该事件不被认作 terminal。同样地 `status=failed` 的 turn 也永不落 terminal。
+
+### 修复
+
+`refineTerminalType(type, event)`：当方法名为 `turn.completed` 时，按 **canonical turn record** 的 `status` 细分为 `turn.interrupted` / `turn.failed`；deep/nested 记录不参与，保留既有 fail-closed 冲突检测。该细分同时接入 `collectStatusSources` 的顶层判别器，避免 `event.method` 与细分结果互相误判为冲突。
+
+### 验证
+
+修复后停掉加载旧代码的 Server（同时验证 SIGTERM 干净退出、无残留 app-server 子进程），冷启动加载新代码：
+
+- 冷启动 recovery 将僵死 execution 对账为 `failed` 并经 Hook 回流：`Codex subagent 01a08ef6-181b-... failed (89b86a83)`
+- 起长任务线程后 `codex_interrupt`：线程落到 `interrupted` 并自动回流 `Codex subagent 01a08efb-0820-... interrupted (77ee1658)`
+- DB 校验：`terminal_status=interrupted, delivery_state=delivered`；`executions` 表无残留
+- `codex_status` 返回 `{"status":"interrupted"}`
+
+## 4. 附带改进：注入文本中的 completionId 截断
+
+`completionId` 是 Runtime 内部交付主键，对模型控制面无用（10 个工具无一接受它），完整 UUID 出现在注入文本属内部字段外泄。`render-completions.mjs` 现对 UUID 形态 id 只渲染前 8 位（`(77ee1658)`），非 UUID 自定义 id 原样保留。新增单测锁定该行为。
+
+## 5. 回归与证据
+
+- `npm test`：112/112 通过（新增 multiplexed terminal、UUID 截断等用例；修正 2 处编码了"方法名决定状态"错误前提的旧断言）
+- `npm run lint`：通过
+- `npm run smoke`：通过
+- 真实路径证据：server.log `codex.selected`、SQLite completion 行、Hook 注入原文（见上）
+
+## 6. 遗留
+
+- `codex_steer` 仅验证 `accepted:true` 受理，未验证 steer 内容真实改变输出（被中断打断）。
+- 未验证 `status=failed` 的真实 turn 路径（仅经 recovery 合成 failed 验证）。

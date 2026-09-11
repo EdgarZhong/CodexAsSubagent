@@ -4,7 +4,7 @@
 
 - 目标：按 docs/Codex As Subagent — 详细设计与编码规格.md 自主交付尽可能完整的 V1，并形成可运行、可测试、可继续演进的 Git 仓库。
 - 阶段：Task 1-8 已完成；V1 验收完成；ZCode 插件协议已按真实 bundle 取证修复；真实 Codex app-server E2E（spawn/wait/status，gpt-5.6-luna 真实模型调用）已于 2026-09-11 通过，见 docs/autonomous-runs/20260911-1206-real-codex-e2e.md。插件已用标准 ZCode marketplace 方式装入本机并启用，MCP bootstrap 由 ZCode GUI 会话拉起（进程链 `node src/cli/main.mjs mcp` ← `zcode-cli` ← `zcode-host-local-1`）。2026-09-11 真实插件路径实测暴露并修复 4 处缺陷，Hook 回流端到端打通，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。
-- 下一步候选：Runtime 自动发现/probe 模块实现（设计 6.4 已定稿）；真实 send/steer/interrupt 与 crash recovery 路径；config.toml 增量覆写实现（当前零代码读取）；插件命令在 GUI 子进程 PATH 中的可行性（开源一键安装需保证 `codex-as-subagent` 可被 Host 发现，或改用 `node` + 解析后的绝对路径，且 ZCode 插件 update 会从源目录重同步覆盖本地化 patch）；session 级隔离（V2，设计 6.2 末尾）。
+- 下一步候选：真实 send/steer 成功路径（已验证 accepted ACK 与 steer 受理，未验证 steer 内容真实生效）；crash recovery 真实路径（已验证 recovery 对账落 failed 并回流）；config.toml 增量覆写实现（当前零代码读取）；插件命令在 GUI 子进程 PATH 中的可行性（开源一键安装需保证 `codex-as-subagent` 可被 Host 发现，或改用 `node` + 解析后的绝对路径，且 ZCode 插件 update 会从源目录重同步覆盖本地化 patch）；`doctor` 命令（设计 6.4 提及，未实现）；session 级隔离（V2，设计 6.2 末尾）。
 - 基线：2026-09-11，已完成 Git 分支、package manifest、CLI/共享常量、源码与测试目录骨架及 pinned Submodule。
 - 默认裁决：使用 Node.js ESM 与内置 node:sqlite；以 fake/in-memory Supervisor Adapter 支撑确定性单元测试，同时保留真实上游 Adapter 接口。
 
@@ -23,6 +23,8 @@
 - [x] 自主执行 git commit；不执行 push、发布或跨工作区合并。
 - [x] 以标准 marketplace 方式把 ZCode 插件装入本机、启用，并确认 GUI 会话拉起 MCP bootstrap。
 - [x] 真实插件路径实测并修复 4 处缺陷（--data-dir 透传、adapter 未终止 app-server、idle shutdown 未触发、Hook 参数解析导致输出非 JSON）；Hook 回流端到端打通。
+- [x] 实现 Server 冷启动 Codex runtime 自动发现（设计 6.4）。
+- [x] 十工具真实 ZCode 会话 E2E；发现并修复第 5 处缺陷（turn 终止通知复用导致 interrupted/failed 不落 terminal）；PostToolUse 中途回流实证。
 
 ## 当前动态决策
 
@@ -56,6 +58,8 @@
     - **PATH 结论修正（推翻此前判断）**：此前据 `launchctl getenv PATH` 为空断言"GUI 子进程 PATH 不可信"。实测 GUI 传给 MCP 子进程的 PATH 很丰富（含 `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin`、nvm node bin 等）。故裸命令 `codex-as-subagent` 只要装进其中任一目录（`npm install -g .` 或软链）即可被解析；此前结论是基于错误探针的误判。
     - **两种安装方式并存**：方式 A 走 ZCode GUI 标准路径（插件保持裸命令，要求命令在 PATH 中；社区分发推荐）。方式 B 为新增 `codex-as-subagent install --host=zcode`（`src/install/zcode-plugin.mjs` + `src/cli/install.mjs`）：拷贝插件到 `~/.zcode/cli/plugins/cache/<marketplace>/<name>/<version>`，把 `.mcp.json`/`hooks/hooks.json` 命令本地化为 `process.execPath` + CLI 绝对路径（**不依赖 PATH**），探测 Codex 运行时写入 `CODEX_BIN` 与 `CODEX_APP_SERVER_ARGS`，注册 marketplace/安装记录并启用；覆盖前各留 `.bak-cas` 备份；支持 `--dry-run`/`--portable`/`--zcode-root`；幂等且不破坏其它插件状态。
     - 已用方式 B 对真实 ZCode 根实装并验证：`zcode plugins list` 显示 `hooks: 3`，缓存三事件齐全，4 个既有插件状态完好。回归 97/97。
+
+17. 十工具 E2E 与中断协议裁决（2026-09-11，用户要求在真实 ZCode 会话内逐个实测）。实测 10 个工具全部可用，注入经 PostToolUse 在 turn 中途自动回流（非人工 `drain`）。**发现并修复第 5 个真 bug（协议层）**：codex app-server 把 `completed`/`interrupted`/`failed` 三种 turn 终止**复用同一个 `turn/completed` 通知**（已用 `generate-json-schema` 证实：全 schema 仅有 `TurnCompletedNotification`，无 `TurnFailed/InterruptedNotification`；真实终止状态在 `params.turn.status`，`TurnStatus = completed|interrupted|failed|inProgress`）。我们的 normalizer 原先用"方法名"推期望状态，导致 `turn/completed` + `status=failed|interrupted` 被判为冲突而不认作 terminal → 被中断/失败的 turn 永不落 completion、线程永久 `running`、Server 也无法 idle 退出（实测 B 线程中断后僵死 5 分钟）。修法：`refineTerminalType()` 仅依据 **canonical turn record** 的 status 把 `turn.completed` 细分为 `turn.interrupted`/`turn.failed`，并把该细分同步到 `collectStatusSources` 的顶层判别器；deep/nested 记录不参与，保持既有 fail-closed 冲突检测。该复用是上游设计预期（用户确认），非缺陷；缺陷在本侧判别逻辑。同时将 completion 注入文本中的内部 `completionId` 由完整 UUID 截断为前 8 位（内部主键对模型无用，避免外泄）。验证：中断长任务线程落到 `interrupted` 并自动回流；冷启动 recovery 将僵死 execution 对账为 `failed` 并回流；回归 112/112。记录 `docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md`。
 
 ## 执行边界
 

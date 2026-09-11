@@ -406,15 +406,18 @@ test('CompletionRouter rejects nested status and identity conflicts', async (t) 
     ownerInstanceId: 'router-instance',
   });
 
-  const normalizedStatusConflict = normalizeEvent({
+  // codex 把 completed/interrupted/failed 三种 turn 终止都复用 `turn/completed` 通知
+  // （schema 中只有 TurnCompletedNotification），canonical turn record 的 status 才是权威，
+  // 因此该形状是合法终止而非冲突。但 deep/nested 记录不参与细分，仍必须 fail closed。
+  const nestedStatusConflict = normalizeEvent({
     method: 'turn/completed',
     threadId,
     turnId,
-    turn: { id: turnId, status: 'failed' },
+    params: { item: { turn: { id: turnId, status: 'failed' } } },
   });
-  assert.equal(normalizedStatusConflict.status, undefined);
-  assert.equal(normalizedStatusConflict.verifiedTerminalStatus, false);
-  assert.equal(router.onTerminal(normalizedStatusConflict), null);
+  assert.equal(nestedStatusConflict.status, undefined);
+  assert.equal(nestedStatusConflict.verifiedTerminalStatus, false);
+  assert.equal(router.onTerminal(nestedStatusConflict), null);
 
   for (const event of [
     {

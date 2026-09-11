@@ -127,6 +127,18 @@ function currentTurnRecord(event) {
           : null;
 }
 
+// codex 把 completed/interrupted/failed 三种 turn 终止都复用 `turn/completed` 通知
+// （schema 里没有 TurnFailedNotification/TurnInterruptedNotification），真实状态在
+// turn record 的 status（TurnStatus）。因此方法名只能确定这是终止族事件，具体状态
+// 必须以 canonical turn record 为准；仅对 canonical 记录细分，deep/nested 记录不参与，
+// 保持既有的 fail-closed 冲突检测。
+function refineTerminalType(type, event) {
+  if (type !== 'turn.completed') return type;
+  const status = normalizeStatus(currentTurnRecord(event)?.status);
+  if (status === 'interrupted' || status === 'failed') return `turn.${status}`;
+  return type;
+}
+
 function turnId(turn) {
   return firstString(turn?.id, turn?.turnId);
 }
@@ -319,8 +331,10 @@ function collectStatusSources(event) {
     if (!isRecord(record) || !Object.hasOwn(record, field)) continue;
     const type = methodType(record[field]);
     // A process lifecycle error is the adapter's explicit thread-scoped crash signal.
+    // 顶层判别器与 normalizeEvent 使用同一套细分，避免 event.method=turn/completed
+    // 把 turn record 已经声明的 interrupted/failed 误判为 completed 冲突。
     const status = type === 'error' && isProcessFailure(event)
-      ? 'failed' : TERMINAL_EVENT_STATUSES.get(type) ?? null;
+      ? 'failed' : TERMINAL_EVENT_STATUSES.get(refineTerminalType(type, event)) ?? null;
     sources.push({ source, status });
   }
   for (const evidence of eventEvidenceRecords(event)) {
@@ -358,7 +372,7 @@ function assistantText(event, type) {
 }
 
 export function normalizeEvent(event) {
-  const type = eventType(event);
+  const type = refineTerminalType(eventType(event), event);
   const threadIdentity = identityState(threadIdentityCandidates(event));
   const turnIdentity = identityState(turnIdentityCandidates(event));
   const threadId = threadIdentity.value;

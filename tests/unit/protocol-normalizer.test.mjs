@@ -178,10 +178,8 @@ test("normalizeEvent preserves terminal status provenance and rejects status con
   }
 
   for (const input of [
-    {
-      method: "turn/completed",
-      turn: { id: "turn-status", status: "failed" },
-    },
+    // codex 复用 `turn/completed` 承载 terminated/failed，canonical turn record 的
+    // status 才是权威；此处 method 与 payload 不再冲突，见下方 multiplexed 用例。
     {
       method: "turn/failed",
       turn: { id: "turn-status", status: "completed" },
@@ -205,6 +203,48 @@ test("normalizeEvent preserves terminal status provenance and rejects status con
     assert.equal("status" in event, false);
     assert.equal(event.verifiedTerminalStatus, false);
   }
+});
+
+test("codex multiplexes terminal turn states onto turn/completed with the real status in the turn record", () => {
+  // 真实 codex app-server 在 turn 被中断时发出的是 turn/completed 通知，且
+  // params.turn.status === "interrupted"（实测 0.153.4）。normalizer 必须据此细分终止类型，
+  // 否则被中断/失败的 turn 永远不会产出 terminal result。
+  for (const [reported, expected] of [
+    ["completed", "turn.completed"],
+    ["interrupted", "turn.interrupted"],
+    ["failed", "turn.failed"],
+  ]) {
+    const event = normalizeEvent({
+      method: "turn/completed",
+      kind: "notification",
+      params: {
+        threadId: "thread-mux",
+        turn: { id: "turn-mux", status: reported, items: [] },
+      },
+    });
+    assert.equal(event.type, expected, reported);
+    assert.equal(event.status, reported, reported);
+    assert.equal(event.threadId, "thread-mux");
+    assert.equal(event.verifiedTerminalStatus, true);
+  }
+
+  // inProgress 不是终止状态：即便方法名是 turn/completed，也必须 fail closed。
+  const inProgress = normalizeEvent({
+    method: "turn/completed",
+    params: { threadId: "thread-mux", turn: { id: "turn-mux", status: "inProgress" } },
+  });
+  assert.equal("status" in inProgress, false);
+  assert.equal(inProgress.verifiedTerminalStatus, false);
+
+  // 只有 canonical turn record 能细分；deep/nested 冲突仍必须 fail closed。
+  const deep = normalizeEvent({
+    method: "turn/completed",
+    threadId: "thread-mux",
+    turnId: "turn-mux",
+    params: { item: { turn: { id: "turn-mux", status: "interrupted" } } },
+  });
+  assert.equal("status" in deep, false);
+  assert.equal(deep.verifiedTerminalStatus, false);
 });
 
 test("normalizeEvent fails closed for deep turn status and identity evidence", () => {
