@@ -67,6 +67,8 @@
 
 ## 遗留风险与后续
 
-- 缓存 patch 依赖手工本地化：ZCode **插件 update**（非 GUI 重启）会从源目录重同步，覆盖为裸命令 `codex-as-subagent`，而 GUI 子进程 PATH 不含它 → MCP 工具会消失。彻底解法是让 `plugins/zcode/.mcp.json` 走可发现的命令（如安装后软链进 PATH 或改用 `node`+相对解析）。
-- 未在本轮验证：真实 ZCode 会话内 UserPromptSubmit 事件的端到端注入（Stop 事件已在本会话真实验证）；send/steer/interrupt 真实路径；崩溃恢复真实路径；MCP server 是否注入 session env。
+> 本节的"未验证项"为**当时快照**。截至 2026-09-11 晚已闭环的情况见下条，最新状态以 docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md 与 CLAUDE.md 任务看板为准。
+
+- 缓存 patch 依赖手工本地化：ZCode **插件 update**（非 GUI 重启）会从源目录重同步，覆盖为裸命令 `codex-as-subagent`，而 GUI 子进程 PATH 未必含它 → MCP 工具会消失。彻底解法是让命令走可发现路径或改用 `node`+绝对路径；列入 CLAUDE.md Backlog。
+- 当时未验证（后续进展）：真实 ZCode 会话内 UserPromptSubmit 端到端注入（**仍未验证**）；send/steer/interrupt 真实路径（**已于 1340 验收验证**）；崩溃恢复真实路径（**已于 1340 验收验证：冷启动 recovery 对账落 failed 并回流**）；MCP server 是否注入 session env（**仍未确认**）。
 - `ZCODE_SESSION_ID` 已确认由 ZCode 注入，但 Bootstrap/Runtime 尚未消费它（session 隔离属 V2）。

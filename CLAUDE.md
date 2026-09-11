@@ -3,8 +3,8 @@
 ## 当前阶段
 
 - 目标：按 docs/Codex As Subagent — 详细设计与编码规格.md 自主交付尽可能完整的 V1，并形成可运行、可测试、可继续演进的 Git 仓库。
-- 阶段：Task 1-8 已完成；V1 验收完成；ZCode 插件协议已按真实 bundle 取证修复；真实 Codex app-server E2E（spawn/wait/status，gpt-5.6-luna 真实模型调用）已于 2026-09-11 通过，见 docs/autonomous-runs/20260911-1206-real-codex-e2e.md。插件已用标准 ZCode marketplace 方式装入本机并启用，MCP bootstrap 由 ZCode GUI 会话拉起（进程链 `node src/cli/main.mjs mcp` ← `zcode-cli` ← `zcode-host-local-1`）。2026-09-11 真实插件路径实测暴露并修复 4 处缺陷，Hook 回流端到端打通，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。同日完成十工具真实会话 E2E、Server 冷启动 runtime 自动发现、第 5 处缺陷（turn 终止通知复用）修复，见 docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md。当前确定性回归 112/112。
-- 下一步候选：config.toml 增量覆写实现（当前零代码读取）；插件命令在 GUI 子进程 PATH 中的可行性（开源一键安装需保证 `codex-as-subagent` 可被 Host 发现，或改用 `node` + 解析后的绝对路径，且 ZCode 插件 update 会从源目录重同步覆盖本地化 patch）；`doctor` 命令（设计 6.4 提及，未实现）；`npm run lint` 覆盖面（当前仅单文件语法检查）与 `tests/e2e`/`tests/fixtures` 空占位；session 级隔离（V2，设计 6.2 末尾）。跨客户端线程锁按边界接受（决策 18），错误规范化已完成。
+- 阶段：Task 1-8 已完成；V1 验收完成；ZCode 插件协议已按真实 bundle 取证修复；真实 Codex app-server E2E（spawn/wait/status，gpt-5.6-luna 真实模型调用）已于 2026-09-11 通过，见 docs/autonomous-runs/20260911-1206-real-codex-e2e.md。插件已用标准 ZCode marketplace 方式装入本机并启用，MCP bootstrap 由 ZCode GUI 会话拉起（进程链 `node src/cli/main.mjs mcp` ← `zcode-cli` ← `zcode-host-local-1`）。2026-09-11 真实插件路径实测暴露并修复 4 处缺陷，Hook 回流端到端打通，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。同日完成十工具真实会话 E2E、Server 冷启动 runtime 自动发现、第 5 处缺陷（turn 终止通知复用）修复、跨客户端锁错误规范化，见 docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md。当前确定性回归 117/117。
+- 待完成/明确不做项见「任务看板」的 Backlog 与「明确不做（V1 决定）」两节；本行不再重复枚举。
 - 基线：2026-09-11，已完成 Git 分支、package manifest、CLI/共享常量、源码与测试目录骨架及 pinned Submodule。
 - 默认裁决：使用 Node.js ESM 与内置 node:sqlite；以 fake/in-memory Supervisor Adapter 支撑确定性单元测试，同时保留真实上游 Adapter 接口。
 
@@ -25,6 +25,29 @@
 - [x] 真实插件路径实测并修复 4 处缺陷（--data-dir 透传、adapter 未终止 app-server、idle shutdown 未触发、Hook 参数解析导致输出非 JSON）；Hook 回流端到端打通。
 - [x] 实现 Server 冷启动 Codex runtime 自动发现（设计 6.4）。
 - [x] 十工具真实 ZCode 会话 E2E；发现并修复第 5 处缺陷（turn 终止通知复用导致 interrupted/failed 不落 terminal）；PostToolUse 中途回流实证。
+- [x] 跨客户端线程锁错误规范化为 `thread_locked`（只规范化此一已知原因，其余上游错误原样透传）。
+
+### Backlog（V1 未完成项，按优先级）
+
+- [ ] **`config.toml` 增量覆写实现**：设计 6.3/6.4 已定稿（对 Codex 配置的 `-c key=value` 覆写），当前**零代码读取**。优先级最高，属设计已承诺项。
+- [ ] **开源一键安装在 Host 子进程 PATH 的发现方案**：安装后若 ZCode 插件 update 从源目录重同步，会把本地化命令覆盖回裸命令 `codex-as-subagent`，而 GUI 子进程 PATH 未必含它 → MCP 工具消失。解法：命令走可发现路径，或改用 `node` + 解析后的绝对路径。
+- [ ] **`doctor` 命令**：设计 6.4 提及，未实现（诊断 runtime 发现、配置分层、锁与数据目录状态）。
+- [ ] **`npm run lint` 覆盖面**：当前仅 `node --check src/cli/main.mjs` 单文件语法检查，无 ESLint/规则检查，不能代表全仓静态质量。
+- [ ] **`tests/e2e`、`tests/fixtures` 为空占位**：真实端到端目前仅靠 `docs/autonomous-runs/` 手工路径，缺可重复执行的自动化 E2E。
+- [ ] **真实 `status=failed` 的 turn 路径未单独构造验证**：当前仅经 recovery 合成 failed 验证过（interrupted 已真机验证）。
+- [ ] **真实 ZCode `UserPromptSubmit` 事件端到端注入未验证**：Stop 与 PostToolUse 均已真机验证；UserPromptSubmit 只验证过 wrapper 输出形态。
+- [ ] **MCP server 是否注入 `ZCODE_SESSION_ID` 未确认**：影响 V2 session 隔离的取数方式。
+- [ ] **session 级隔离（V2）**：设计 6.2 末尾，V1 前提是单 workspace 单主会话。
+
+### 明确不做（V1 决定，非遗漏）
+
+- **不做线程锁探测**：不实现"探测 `~/.codex/thread-writer-locks/` 并在 `thread/list` 标记被占用"（用户 2026-09-11 拍板）。理由：协议层无锁字段；本地 flock 探测无法区分"自己持有 vs 他人持有"，会误报自家可用线程。跨客户端锁争用作为 V1 使用前提接受（同机同 `~/.codex` 时避免多客户端并用），仅将其错误规范化为 `thread_locked`。
+- **不新增 Hook 事件**：`PreToolUse`/`PermissionRequest`/`PostToolUseFailure` 无回流语义，`SessionStart` 时机过早；固定 `UserPromptSubmit` + `PostToolUse` + `Stop`（决策 15）。
+- **不加 `stop_hook_active` 护栏**：claim→ack 在同一瞬间清除 pending，构造上无法套娃，加护栏反而掐掉合法投递（决策 15）。
+- **session 级隔离推迟到 V2**（决策 8）。
+- **MCP public API 不增加** cwd/workspace/sandbox/approval/event cursor/raw event/generic Codex config 编辑能力（AGENTS.md）。
+- **Hook 不做重活**：不把 Hook 变 MCP tool，不让 Hook 启动/恢复/中断 thread，不让 Bootstrap 持有 Runtime 或 SQLite 业务状态（AGENTS.md）。
+- **不通过 PID 相等清理 orphan app-server**：必须能高置信证明归属当前旧实例（AGENTS.md）。
 
 ## 当前动态决策
 
@@ -34,13 +57,13 @@
 4. 不确定项处理：详细设计没有锁定上游具体 commit、Host Hook stdin/additionalContext 协议细节、Codex app-server 当前 wire schema 和 dedicated profile 安装方式；本轮先提供可替换 Adapter、Host wrapper 配置和明确错误边界，并在最终报告列出待确认项。
 5. MCP façade：使用最小 JSON-lines JSON-RPC 实现 `initialize`、`tools/list`、`tools/call`、`ping` 和通知；业务错误以 `isError` content 返回，协议级未知方法保持 JSON-RPC 错误；Bootstrap 不持有 Runtime/SQLite 业务状态。
 6. Hook wrapper：各 Host 只在 `src/hook/hosts/` 做可替换文本 envelope；由于规格没有锁定外部 Host wire schema，真实 ZCode 协议兼容性列入 Task 8 外部验收风险，不伪称已完成。
-7. 最终验收：本地确定性路径以 79/79 全量测试（2026-09-11 当时值；当前 112/112）、lint、smoke、源码语法和 diff check 为证据；真实 Codex app-server、Host 断开和 ZCode E2E 未在缺少可验证外部会话时伪造通过，详情见 `docs/autonomous-runs/20260911-0926-codex-as-subagent-v1.md`。
+7. 最终验收：本地确定性路径以 79/79 全量测试（2026-09-11 当时值；当前 117/117）、lint、smoke、源码语法和 diff check 为证据；真实 Codex app-server、Host 断开和 ZCode E2E 未在缺少可验证外部会话时伪造通过，详情见 `docs/autonomous-runs/20260911-0926-codex-as-subagent-v1.md`。
 8. 多主会话隔离（用户 2026-09-11 拍板）：V1 隔离边界只到 workspace，无 session 维度；V1 使用前提为同一 workspace 同时只运行一个启用本插件的主会话。session 级隔离（Bootstrap 持有会话身份、`owner_session_id`、Hook 按会话领取）列入 V2，三个待拍板点（孤儿 completion 降级、跨 session 读、隐藏 vs 标注占用）已写入详细设计 6.2 节末尾。
 9. Codex CLI 来源（2026-09-11 核实）：本机无需另装 CLI，ChatGPT.app 内嵌完整 codex-cli 0.153.4，路径 `/Applications/ChatGPT.app/Contents/Resources/codex`，含 `app-server` 子命令；通过 vendor `AppServerClient` 的 `CODEX_BIN` 环境变量指向该路径即可，无需软链进 PATH。该 CLI 提供 `codex app-server generate-json-schema`，可导出当前版本官方 wire schema 用于核对 adapter 假设。
 10. 配置分层（用户 2026-09-11 拍板，同日晚澄清）：`~/.codex-as-subagent/config.toml` 是对 app-server 所用 Codex 配置的**可选增量覆写**（与 Codex 配置同名、只含 Codex 键）——文件不存在则不覆写，直接用 Codex 常规 `~/.codex/config.toml`（本机该文件已可用，故可不配）；文件存在则在启动 app-server 时翻译为 `-c key=value` 参数注入（vendor 已支持 `CODEX_APP_SERVER_ARGS` 传参）。用途是解耦日常 Codex 与 Subagent 所用 Codex 的配置；它不配置 Server 自身行为。Codex 二进制路径不写入任何 config.toml，走 `CODEX_BIN` env，缺省时启动时自动发现为绝对路径（GUI Host 子进程 PATH 不可信；已实测本机 `launchctl getenv PATH` 为空）。已核实：config.toml 当前零实现（无任何代码读取）。运行时自动发现已于 2026-09-11 定稿，见决策 11。
 11. Runtime 自动发现定稿（2026-09-11，依据调研 docs/research/2026-09-11-codex-runtime-discovery.md）：解析顺序 `CODEX_BIN` env > PATH > standalone managed（`~/.codex/packages/standalone/current/bin/codex`）> `~/.local/bin/codex` > Homebrew 已知路径 > ChatGPT.app 内嵌 > 旧 Codex.app 内嵌；不扫描 IDE 私有 runtime，不按版本号排序。发现目标是"满足 stable app-server contract 的 runtime"：realpath 去重 + `--version` + `generate-json-schema` 必需 method 检查 + ephemeral initialize 冒烟；记录 {binary, version, schema hash}；Server 单次生命周期不切换 binary，每次冷启动重新探测。永远自起 app-server 子进程，不 attach Desktop/managed daemon。调研推翻点：app-server 下 `-p` named profile 不可靠，覆写只走 `-c`；调研证实点：认证/配置经 `CODEX_HOME` 共享，App 登录后 CLI 无需再登录。**实现状态（2026-09-11 补齐）**：此前该项长期只有文档与"下一步候选"、无代码，经用户指出后落地于 `src/shared/codex-runtime.mjs`（`codexBinaryCandidates` / `REQUIRED_APP_SERVER_METHODS` / `probeCodexRuntime` / `resolveAppServerArgs`）+ `src/cli/serve.mjs`（冷启动探测、选中固定、失败 fail-closed 记 `codex.discovery.failed`）+ adapter 缺省参数注入。实测跳过 30 个不存在候选命中 0.153.4，全流程 107ms；serve 无 `CODEX_BIN` 可自主发现。安装脚本可选写 `CODEX_BIN` 作优先级 0 提前命中，但**发现始终由 Server 启动时执行**。
 12. 真实 app-server 冒烟（2026-09-11 通过）：ChatGPT.app 内嵌 codex-cli 0.153.4 经 vendor AppServerClient 完成 initialize/model/list/config/read 全链路；`config/read` 返回本机真实配置（gpt-5.6-luna + xhigh + danger-full-access），证实认证共享。九个 adapter 方法（thread/start、thread/resume、turn/start、turn/steer、turn/interrupt、thread/list、thread/read、model/list、config/read）在 0.153.4 官方导出 schema 中全部存在且参数形状匹配。**发现的兼容性问题**：vendor 默认启动参数 `-c mcp_servers.codex-supervisor.enabled=false` 在 0.153.4 下导致 app-server 直接退出（"invalid transport"），我们接入时必须总是显式设置 `CODEX_APP_SERVER_ARGS`（至少 `["app-server"]`），不能依赖 vendor 默认值。冒烟脚本暂存 /tmp/cas-smoke.mjs，待固化为仓库 scripts/。
-13. ZCode Hook 协议已查证（2026-09-11，harness 内嵌 subagent 逆向取证 + 主 Agent 抽查验证，全文 docs/research/2026-09-11-zcode-hook-protocol.md）：恰好 7 个事件（无 SubagentStop/SessionEnd）；stdout 必须以 `{` 开头的严格 JSON（`additionalContext`/`hookSpecificOutput`），纯文本被忽略；无 ACK，exit 0 即完成；Hook env 注入 `ZCODE_SESSION_ID`（session 隔离的关键字段已确认存在）；additionalContext 仅当前 turn 可见，Stop 事件可配 `decision:"block"` 续轮（最多 3 次）。**发现当前实现三处硬伤**：plugins/zcode/plugin.json 用了不存在的 `mcpConfig`/`hooksConfig` 字段；hooks.json 用了非法事件 `after_turn`；zcode.mjs 输出纯文本会被忽略。MCP server 是否注入 session env 未确认。待办：修正插件三处 + dump-stdin 临时插件做运行态实证。
+13. ZCode Hook 协议已查证（2026-09-11，harness 内嵌 subagent 逆向取证 + 主 Agent 抽查验证，全文 docs/research/2026-09-11-zcode-hook-protocol.md）：恰好 7 个事件（无 SubagentStop/SessionEnd）；stdout 必须以 `{` 开头的严格 JSON（`additionalContext`/`hookSpecificOutput`），纯文本被忽略；无 ACK，exit 0 即完成；Hook env 注入 `ZCODE_SESSION_ID`（session 隔离的关键字段已确认存在）；additionalContext 仅当前 turn 可见，Stop 事件可配 `decision:"block"` 续轮（最多 3 次）。**发现当前实现三处硬伤**：plugins/zcode/plugin.json 用了不存在的 `mcpConfig`/`hooksConfig` 字段；hooks.json 用了非法事件 `after_turn`；zcode.mjs 输出纯文本会被忽略。MCP server 是否注入 session env 未确认。待办：修正插件三处 + dump-stdin 临时插件做运行态实证。**状态（2026-09-11 晚）**：插件三处已修（见决策 14），运行态实证已由 1250/1340 两轮真实会话验收完成；仅"MCP server 是否注入 session env"仍未确认（列任务看板 Backlog）。
 14. 真实插件路径实测与 4 处缺陷修复（2026-09-11，记录 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md）。安装方式：仓库根 `marketplace.json` 声明本地 directory marketplace，ZCode 以标准插件机制装入并启用；缓存插件对本机做了本地化 patch（`node` + 仓库绝对路径 + `CODEX_BIN`/`CODEX_APP_SERVER_ARGS` env），已实测 GUI 重启后 patch 保留（重启只读缓存、不从源目录重同步）。实测暴露的 4 处缺陷（fake-adapter 回归全部漏检）：
     - **① Hook 参数解析（最严重，直接使回流失效）**：插件传 `--host=zcode`，但旧 `option()` 只认 `--host zcode`，host 静默回退 `plain`，ZCode 收到纯文本被忽略。已抽 `src/shared/argv.mjs` 统一支持 `--k=v` 与 `--k v` 两种形式，并修 `drain.mjs` 覆盖用户显式 host 的问题。
     - **② `--data-dir` 未透传**：bootstrap spawn serve 时漏传，导致 SQLite 落默认目录、与 socket/lock 分叉。已在 `stdio-bootstrap`/`startup-lock`/`mcp` 全链路透传；未显式给定时按 socket 所在目录推导。
@@ -59,7 +82,7 @@
     - **两种安装方式并存**：方式 A 走 ZCode GUI 标准路径（插件保持裸命令，要求命令在 PATH 中；社区分发推荐）。方式 B 为新增 `codex-as-subagent install --host=zcode`（`src/install/zcode-plugin.mjs` + `src/cli/install.mjs`）：拷贝插件到 `~/.zcode/cli/plugins/cache/<marketplace>/<name>/<version>`，把 `.mcp.json`/`hooks/hooks.json` 命令本地化为 `process.execPath` + CLI 绝对路径（**不依赖 PATH**），探测 Codex 运行时写入 `CODEX_BIN` 与 `CODEX_APP_SERVER_ARGS`，注册 marketplace/安装记录并启用；覆盖前各留 `.bak-cas` 备份；支持 `--dry-run`/`--portable`/`--zcode-root`；幂等且不破坏其它插件状态。
     - 已用方式 B 对真实 ZCode 根实装并验证：`zcode plugins list` 显示 `hooks: 3`，缓存三事件齐全，4 个既有插件状态完好。回归 97/97（当时值）。
 
-17. 十工具 E2E 与中断协议裁决（2026-09-11，用户要求在真实 ZCode 会话内逐个实测）。实测 10 个工具全部可用，注入经 PostToolUse 在 turn 中途自动回流（非人工 `drain`）。**发现并修复第 5 个真 bug（协议层）**：codex app-server 把 `completed`/`interrupted`/`failed` 三种 turn 终止**复用同一个 `turn/completed` 通知**（已用 `generate-json-schema` 证实：全 schema 仅有 `TurnCompletedNotification`，无 `TurnFailed/InterruptedNotification`；真实终止状态在 `params.turn.status`，`TurnStatus = completed|interrupted|failed|inProgress`）。我们的 normalizer 原先用"方法名"推期望状态，导致 `turn/completed` + `status=failed|interrupted` 被判为冲突而不认作 terminal → 被中断/失败的 turn 永不落 completion、线程永久 `running`、Server 也无法 idle 退出（实测 B 线程中断后僵死 5 分钟）。修法：`refineTerminalType()` 仅依据 **canonical turn record** 的 status 把 `turn.completed` 细分为 `turn.interrupted`/`turn.failed`，并把该细分同步到 `collectStatusSources` 的顶层判别器；deep/nested 记录不参与，保持既有 fail-closed 冲突检测。该复用是上游设计预期（用户确认），非缺陷；缺陷在本侧判别逻辑。同时将 completion 注入文本中的内部 `completionId` 由完整 UUID 截断为前 8 位（内部主键对模型无用，避免外泄）。验证：中断长任务线程落到 `interrupted` 并自动回流；冷启动 recovery 将僵死 execution 对账为 `failed` 并回流；回归 112/112。记录 `docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md`。
+17. 十工具 E2E 与中断协议裁决（2026-09-11，用户要求在真实 ZCode 会话内逐个实测）。实测 10 个工具全部可用，注入经 PostToolUse 在 turn 中途自动回流（非人工 `drain`）。**发现并修复第 5 个真 bug（协议层）**：codex app-server 把 `completed`/`interrupted`/`failed` 三种 turn 终止**复用同一个 `turn/completed` 通知**（已用 `generate-json-schema` 证实：全 schema 仅有 `TurnCompletedNotification`，无 `TurnFailed/InterruptedNotification`；真实终止状态在 `params.turn.status`，`TurnStatus = completed|interrupted|failed|inProgress`）。我们的 normalizer 原先用"方法名"推期望状态，导致 `turn/completed` + `status=failed|interrupted` 被判为冲突而不认作 terminal → 被中断/失败的 turn 永不落 completion、线程永久 `running`、Server 也无法 idle 退出（实测 B 线程中断后僵死 5 分钟）。修法：`refineTerminalType()` 仅依据 **canonical turn record** 的 status 把 `turn.completed` 细分为 `turn.interrupted`/`turn.failed`，并把该细分同步到 `collectStatusSources` 的顶层判别器；deep/nested 记录不参与，保持既有 fail-closed 冲突检测。该复用是上游设计预期（用户确认），非缺陷；缺陷在本侧判别逻辑。同时将 completion 注入文本中的内部 `completionId` 由完整 UUID 截断为前 8 位（内部主键对模型无用，避免外泄）。验证：中断长任务线程落到 `interrupted` 并自动回流；冷启动 recovery 将僵死 execution 对账为 `failed` 并回流；当轮回归 112/112（错误规范化完成时为 117/117）。记录 `docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md`。
 
 18. 跨客户端线程锁与错误规范化（2026-09-11 实测发现；错误规范化同日完成，锁本身按边界接受）。向"上一 Server 实例创建、当前实例未持有"的线程调 `codex_send` 时，上游返回 `thread ... already has an active writer`。
     - **根因**：Codex app-server 对每个 thread 用 flock 型写锁（`~/.codex/thread-writer-locks/<threadId>.lock`，二进制含 `writer_lock.rs`、"failed to acquire thread writer lock"）。`~/.codex` 跨客户端共享，同一账号下运行的 ChatGPT 桌面版 app-server 会持有这些线程的锁。实测：桌面版 PID 63149 同时持有 9 个历史线程的锁；本 Server 自己新建的线程由其自己的 app-server 持有，`send` 正常；Server idle 退出后其 app-server 释放锁，再次冷启动时旧线程被桌面版接管 → 故"换实例后对旧线程 send"最易触发。这是共享 Codex 存储的固有限制，非本项目锁实现缺陷；V1 隔离边界是 workspace，不含"Codex 客户端独占"维度。**用户 2026-09-11 拍板：锁探测不做，接受此边界为前提**（该前提需在同机同 `~/.codex` 且多客户端并用时写入使用说明）。

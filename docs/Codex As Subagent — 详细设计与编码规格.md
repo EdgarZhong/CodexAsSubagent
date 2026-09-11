@@ -1723,6 +1723,8 @@ idle shutdown
 
 选中后记录 `{binary 绝对路径, version, schema hash}`；Server 单次生命周期内绝不切换 binary；每次冷启动重新执行发现与探测（App 自动更新可能在同一路径下替换实现）。全部候选失败时 fail-closed，`doctor` 输出各候选诊断，并建议官方 standalone 安装（`curl -fsSL https://chatgpt.com/codex/install.sh | sh`，支持 `--release X.Y.Z` pin）。
 
+> **未实现项（2026-09-11）**：`doctor` 命令**尚未实现**；探测失败的诊断目前写入 `server.log` 的 `codex.discovery.failed` 事件。详见 CLAUDE.md 任务看板 Backlog。
+
 > **实现状态（2026-09-11）**：已落地于 `src/shared/codex-runtime.mjs` 与 `src/cli/serve.mjs`。
 > - `codexBinaryCandidates()` 按上述顺序生成候选取并集（去重）。
 > - `probeCodexRuntime()` 逐候选执行完整三段探测；`REQUIRED_APP_SERVER_METHODS` 列出 adapter 依赖的九个 wire method（thread/start、thread/resume、turn/start、turn/steer、turn/interrupt、thread/list、thread/read、model/list、config/read），schema 文本缺任一即拒绝该候选。

@@ -93,13 +93,29 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 
 Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP」：改 `plugins/<host>/` 源码 → `install --host=<host>` → 重启宿主 → 验证。
 
-## 已知限制（V1）
+## 已知限制与未完成项（V1）
+
+**使用前提与限制**
 
 - **共享 `~/.codex` 的跨客户端线程锁**：Codex app-server 对每个 thread 持有 flock 型写锁（`~/.codex/thread-writer-locks/<threadId>.lock`）。若同一账号下另有 Codex 客户端（如 ChatGPT 桌面版）同时运行并占用某线程，本项目的 `codex_send`/`codex_steer`/`codex_interrupt` 对该线程会失败；只读操作（`codex_status`/`codex_read_thread`）不受影响。本 Runtime Server 自己创建的线程由自己的 app-server 持锁，正常可用。该情况返回稳定错误码 `thread_locked`（文案提示关闭另一客户端或改用新线程）。这是共享 Codex 存储的固有限制，V1 接受其为使用前提（同机、同 `~/.codex` 时避免多客户端并用）。
+- **单 workspace 单主会话**：V1 隔离边界是 workspace，同一 workspace 同时只运行一个启用本插件的主会话；session 级隔离为 V2（详细设计 6.2 末尾）。
 - **仅 `thread_locked` 一个上游错误被规范化**，其余上游错误保持原样透传（code/message 均不改）。
+
+**尚未完成（V1 Backlog，权威清单见 CLAUDE.md 任务看板）**
+
+- **`config.toml` 增量覆写未实现**（无代码读取），属设计 6.3/6.4 已承诺但未落地项。
 - **`npm run lint` 只做单文件语法检查**（`node --check src/cli/main.mjs`），不覆盖全量源码，也无 ESLint 规则。
-- **`tests/e2e/` 与 `tests/fixtures/` 为空占位**；真实端到端目前靠 `docs/autonomous-runs/` 的手工验收路径。
-- **`config.toml` 增量覆写未实现**（无代码读取）。
+- **`tests/e2e/` 与 `tests/fixtures/` 为空占位**；真实端到端目前靠 `docs/autonomous-runs/` 的手工验收路径，缺可重复执行的自动化 E2E。
+- **`doctor` 命令未实现**（设计 6.4 提及）。
+- **开源一键安装在 Host 子进程 PATH 中的发现方案未定**：ZCode 插件 update 会从源目录重同步覆盖命令本地化。
+- **真实 `status=failed` 的 turn 路径**未单独构造验证（仅经 recovery 合成 failed 验证过）。
+- **真实 ZCode `UserPromptSubmit` 事件的端到端注入未验证**（Stop/PostToolUse 已真机验证）。
+
+**明确不做（V1 决定）**
+
+- **不做线程锁探测**（不实现按 `thread-writer-locks/` 判定并在 `thread/list` 标记占用）：协议层无锁字段，本地 flock 探测无法区分"自己 vs 他人"（会误标自家可用线程）。仅将锁争用错误规范化为 `thread_locked`。
+- **不新增 Hook 事件**，固定 `UserPromptSubmit` + `PostToolUse` + `Stop`。
+- **MCP public API 不增加** cwd/workspace/sandbox/approval/event cursor/raw event/generic Codex config 编辑能力。
 
 ## 开发测试闭环
 

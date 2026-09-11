@@ -44,10 +44,12 @@
 
 ## 外部限制与遗留风险
 
+> 本节为**当时快照**（2026-09-11 上午）。同日晚已完成下列第 1、3 项的真实外部验证，第 2 项部分验证；最新状态以 CLAUDE.md 任务看板与后续三份验收记录（1206 / 1250 / 1340）为准。
+
 以下路径未在本机真实外部环境中执行，因此不宣称 E2E 通过：
 
-1. 真实 Codex app-server 登录、真实模型 spawn/send/steer/interrupt 和上游 wire event。
-2. 真实 Host 断开后仍保持 Codex turn、跨进程 Server crash/app-server crash 恢复。
-3. 真实 ZCode 安装、其具体 Hook stdin/additionalContext 协议和 Host 消费后的端到端回流。
+1. 真实 Codex app-server 登录、真实模型 spawn/send/steer/interrupt 和上游 wire event。**后续：已于 1206 与 1340 验证。**
+2. 真实 Host 断开后仍保持 Codex turn、跨进程 Server crash/app-server crash 恢复。**后续：crash recovery 已于 1340 验证（冷启动 recovery 对账落 failed 并回流）；Host 断开场景见 1250。**
+3. 真实 ZCode 安装、其具体 Hook stdin/additionalContext 协议和 Host 消费后的端到端回流。**后续：已于 1250 与 1340 验证（Stop/PostToolUse 真机回流；UserPromptSubmit 仍未验证）。**
 
 原因是本轮环境没有可验证的真实 Codex/ZCode 外部会话，且详细规格未锁定上游 wire schema 与 Host Hook schema。代码已用 fake adapter、Unix socket、SQLite 和明确的失败边界覆盖可确定部分；`src/hook/hosts/` 的 wrapper 保持可替换，后续应在具备真实 Host 协议后做一次外部验收。

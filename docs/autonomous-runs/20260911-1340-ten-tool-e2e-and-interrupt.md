@@ -4,7 +4,7 @@
 - 执行：主 Agent 在已重启的 ZCode 会话内，直接调用 10 个 MCP 工具，不使用脚本模拟
 - 模型：`gpt-5.5` + `effort=medium`（按用户要求用最便宜模型、降低思考，不用 xhigh）
 - 环境：ZCode GUI 会话；MCP server 由 Host 拉起；Runtime Server 冷启动自动发现 `/Applications/ChatGPT.app/Contents/Resources/codex` 0.153.4
-- 结果：**10/10 工具通过**；注入为 PostToolUse **turn 中途自动回流**（非人工 `drain`）；发现并修复第 5 处缺陷；回归 112/112
+- 结果：**10/10 工具通过**；注入为 PostToolUse **turn 中途自动回流**（非人工 `drain`）；发现并修复第 5 处缺陷；回归 112/112（本记录末尾追加的锁错误规范化后为 117/117）
 
 ## 1. 十工具逐项
 
