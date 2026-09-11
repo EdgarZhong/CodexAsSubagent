@@ -8,6 +8,7 @@ export const ERROR_CODES = Object.freeze({
   NO_ACTIVE_TURN: 'no_active_turn',
   SUPERVISOR_UNAVAILABLE: 'supervisor_unavailable',
   THREAD_BUSY: 'thread_busy',
+  THREAD_LOCKED: 'thread_locked',
   THREAD_NOT_FOUND: 'thread_not_found',
   THREAD_WORKSPACE_MISMATCH: 'thread_workspace_mismatch',
   WORKSPACE_UNAVAILABLE: 'workspace_unavailable',
@@ -80,4 +81,21 @@ export class SupervisorUnavailableError extends DomainError {
 
 export function errorCode(error) {
   return typeof error?.code === 'string' ? error.code : 'internal_error';
+}
+
+// 唯一被规范化的上游错误：Codex app-server 在 thread 正被另一个 Codex 客户端
+// 持有写锁时，返回 JSON-RPC -32600 且 message 为
+// "thread <id> already has an active writer"。这是已知、可恢复的跨客户端争用
+// （~/.codex 跨客户端共享），也是唯一允许改写的上游错误——其余上游错误一律保持
+// 原样透传，不改 code、不改 message。
+// 识别只能依据 message：上游此处复用通用码 -32600，没有可用的专用错误码。
+const THREAD_LOCKED_PATTERN = /already has an active writer/i;
+const THREAD_LOCKED_MESSAGE = 'Thread is locked by another Codex client. Close that client or use a new thread.';
+
+export function normalizeSupervisorError(error) {
+  if (!error || typeof error !== 'object') return error;
+  if (error.code === ERROR_CODES.THREAD_LOCKED) return error;
+  const message = typeof error.message === 'string' ? error.message : '';
+  if (!THREAD_LOCKED_PATTERN.test(message)) return error;
+  return new DomainError(ERROR_CODES.THREAD_LOCKED, THREAD_LOCKED_MESSAGE, { cause: error });
 }

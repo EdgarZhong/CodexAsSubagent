@@ -123,5 +123,31 @@ NOTIF: {"method":"turn/completed","params":{"threadId":"...","turn":{"id":"...",
 - **协议层看不到锁**：`generate-json-schema` 中 `Thread` 无任何锁字段，`ThreadStatus` 仅 `notLoaded|idle|systemError|active`（内部运行状态，非跨进程写锁）。因此 `thread/list` 无法通过协议字段暴露锁状态。
 - **本地 flock 探测无法区分"自己 vs 他人"**：Codex app-server 对 thread 的写锁是"打开即持有、独占、持久"的模型。实测：本 Server 自己新建的线程在 turn 完成后，锁**仍被本 Server 的 app-server 持有**（`lsof` 归属本进程），而 `codex_send` 依然成功。故若仅用 `flock` 探测"是否被锁"来标记线程，会把**自己完全可用的线程也误标为被占用**。
 - 结论：要正确暴露"他人占用"，探测必须进一步判定持有锁的 PID 是否属于**另一个** Codex 客户端（比对 pid 及其父进程链，排除自身 app-server）。仅在"同机、同 `~/.codex`"前提下有意义。
+- **用户拍板（2026-09-11）**：锁探测不做，接受此边界为 V1 使用前提。
+
+### 错误规范化（同日完成）
+
+原始错误形状经裸探针（直接对 codex app-server 发 `thread/resume`）确认：
+
+```
+name    : AppServerError
+code    : -32600   (数字；通用 JSON-RPC Invalid Request，无专用错误码)
+message : thread 01a08efb-da24-... already has an active writer
+method  : thread/resume
+```
+
+即识别只能依据 message。用户口径：**只规范化这一个已知原因，其余上游错误一律原样透传**。
+
+实现：`src/shared/errors.mjs` 新增 `ERROR_CODES.THREAD_LOCKED='thread_locked'` 与 `normalizeSupervisorError()`（正则 `/already has an active writer/i`，幂等，固定文案 `Thread is locked by another Codex client. Close that client or use a new thread.`）；接入两处 —— `asDomainError()`（`runtime-manager.mjs`）与模型可见出口 `toolErrorContent()`（`stdio-bootstrap.mjs`，覆盖未经过 `asDomainError` 的裸 `resumeThread` 路径，这是原始泄漏点）。
+
+验证（新 MCP bootstrap 进程，因每会话新建、需新会话生效）：
+
+| 场景 | 返回 |
+| --- | --- |
+| 锁定线程 `codex_send` | `{"code":"thread_locked","message":"Thread is locked by another Codex client. Close that client or use a new thread."}`，isError:true，无原文泄漏 |
+| 非锁错误（不存在的线程） | `{"code":"internal_error","message":"thread not loaded: 0000..."}`，与原样透传一致，未被误伤 |
+| 单测 | 5 例新增（规范化、幂等、其它错误透传、MCP 出口两路径），全过 |
+
+回归 117/117。注意：当前会话的 MCP server 是会话启动时创建的旧进程，故在 GUI 会话内直接调用仍显示旧原文；新会话（或重启宿主）后生效。
 
 

@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 
 import { ensureServer } from '../server/startup-lock.mjs';
-import { errorCode } from '../shared/errors.mjs';
+import { errorCode, normalizeSupervisorError } from '../shared/errors.mjs';
 import { projectPublic } from './response-projector.mjs';
 import { getToolCallDefinition, TOOL_DEFINITIONS } from './tool-registry.mjs';
 import { validateArguments } from './tool-handlers.mjs';
@@ -64,9 +64,12 @@ function toolContent(value) {
 }
 
 function toolErrorContent(error) {
+  // 唯一允许改写的上游错误：跨客户端线程写锁争用（见 shared/errors.mjs）。
+  // 其余错误的 code/message 一律原样透传。
+  const normalized = normalizeSupervisorError(error);
   return toolContent({
-    code: errorCode(error),
-    message: error?.message ?? 'Tool call failed.',
+    code: errorCode(normalized),
+    message: normalized?.message ?? 'Tool call failed.',
   });
 }
 

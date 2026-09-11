@@ -9,6 +9,7 @@ import {
   ThreadWorkspaceMismatchError,
   WorkspaceUnavailableError,
   errorCode,
+  normalizeSupervisorError,
 } from '../shared/errors.mjs';
 import {
   MAX_ASSISTANT_MESSAGE_CHARS,
@@ -86,6 +87,8 @@ function changesFromTurns(turns) {
 }
 
 function asDomainError(error, fallbackCode = ERROR_CODES.SUPERVISOR_UNAVAILABLE, fallbackMessage = 'Supervisor operation failed.') {
+  const normalized = normalizeSupervisorError(error);
+  if (normalized !== error) return normalized;
   if (error?.code) return error;
   return new DomainError(fallbackCode, fallbackMessage, { cause: error });
 }
