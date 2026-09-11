@@ -1,6 +1,7 @@
 export const name = 'plain';
 
-export function wrap(text) {
+export function wrap(text, completions) {
+  void completions;
   return String(text ?? '');
 }
 

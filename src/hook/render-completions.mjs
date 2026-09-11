@@ -25,7 +25,7 @@ function messageOf(payload) {
 }
 
 function renderOne(completion) {
-  const payload = payloadOf(completion);
+  const payload = payloadOf(completion) || {};
   const threadId = typeof payload.threadId === 'string' ? payload.threadId : 'unknown-thread';
   const status = typeof payload.status === 'string' ? payload.status : 'unknown';
   const completionId = typeof completion?.completionId === 'string'
