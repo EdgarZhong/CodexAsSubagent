@@ -11,14 +11,6 @@
     "shortDescription": "在 Kimi Code 中调用本机 Codex subagent，并接收异步完成结果。",
     "developerName": "EdgarZhong"
   },
-  "mcpServers": {
-    "codex-as-subagent": {
-      "command": "codex-as-subagent",
-      "args": ["mcp"],
-      "startupTimeoutMs": 60000,
-      "toolTimeoutMs": 520000
-    }
-  },
   "hooks": [
     {
       "event": "PreToolUse",

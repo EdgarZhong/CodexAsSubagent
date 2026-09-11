@@ -1,4 +1,4 @@
-import { access, chmod, copyFile, cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, copyFile, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,10 +9,13 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 
 export const PLUGIN_SOURCE_DIR = join(REPO_ROOT, 'plugins', 'kimi-code');
 export const CLI_ENTRY = join(REPO_ROOT, 'src', 'cli', 'main.mjs');
 export const PLUGIN_NAME = 'codex-as-subagent';
-// Kimi 对插件 MCP command 的硬约束：只能是裸 PATH 命令或以 "./" 开头（相对插件根目录），
-// 含 "/" 的绝对路径会被静默丢弃。因此安装器在托管副本内生成 launcher 脚本承载绝对路径。
-export const MCP_LAUNCHER_REL = 'bin/cas-run';
-export const MCP_LAUNCHER_COMMAND = `./${MCP_LAUNCHER_REL}`;
+// 插件 manifest 注册的 MCP 会被宿主以 cwd=插件托管目录拉起，workspace 永远错配；
+// MCP 必须注册在用户级 mcp.json（宿主以 workspace.cwd 作为 stdio 默认工作目录），
+// 插件 manifest 只承载 hooks / system prompt 等与 cwd 无关的资源。
+export const USER_MCP_SERVER_NAME = PLUGIN_NAME;
+export const USER_MCP_STARTUP_TIMEOUT_MS = 60000;
+// CAS codex_wait/wait_many 协议上限 500s，超时需覆盖协议上限并留传输余量（知识库 §19）。
+export const USER_MCP_TOOL_TIMEOUT_MS = 520000;
 
 export function resolveKimiCodeHome(options = {}) {
   const explicit = options.kimiCodeHome;
@@ -30,6 +33,7 @@ export function pluginPaths(kimiCodeHome) {
     managedDir: join(home, 'plugins', 'managed'),
     installPath: join(home, 'plugins', 'managed', PLUGIN_NAME),
     installedPlugins: join(home, 'plugins', 'installed.json'),
+    userMcpJson: join(home, 'mcp.json'),
   };
 }
 
@@ -80,15 +84,25 @@ function hookCommand(command, { cliPath, execPath }) {
   return [quoteShell(execPath), quoteShell(cliPath), ...tokens].join(' ');
 }
 
-export function renderMcpLauncher({ cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
-  return `#!/bin/sh\nexec ${quoteShell(execPath)} ${quoteShell(cliPath)} "$@"\n`;
+export function buildUserMcpServerEntry({ cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
+  return {
+    command: execPath,
+    args: [cliPath, 'mcp'],
+    startupTimeoutMs: USER_MCP_STARTUP_TIMEOUT_MS,
+    toolTimeoutMs: USER_MCP_TOOL_TIMEOUT_MS,
+  };
+}
+
+export function mergeUserMcpConfig(existing, entry) {
+  const base = existing && typeof existing === 'object' ? existing : {};
+  const servers = { ...(base.mcpServers ?? {}) };
+  servers[USER_MCP_SERVER_NAME] = entry;
+  return { ...base, mcpServers: servers };
 }
 
 export function localizeKimiManifest(manifest) {
-  const servers = { ...(manifest?.mcpServers ?? {}) };
-  const current = servers[PLUGIN_NAME] ?? {};
-  servers[PLUGIN_NAME] = { ...current, command: MCP_LAUNCHER_COMMAND };
-  return { ...manifest, mcpServers: servers };
+  const { mcpServers: _stripped, ...rest } = manifest ?? {};
+  return rest;
 }
 
 export function localizeKimiHooks(manifest, { cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
@@ -131,16 +145,18 @@ export async function installKimiCodePlugin(options = {}) {
     updatedAt: now,
   };
   upsertPlugin(installed.plugins, record);
+  const userMcpEntry = buildUserMcpServerEntry({ cliPath, execPath });
   const plan = {
     kimiCodeHome,
     installPath: paths.installPath,
     installedPlugins: paths.installedPlugins,
+    userMcpJson: paths.userMcpJson,
     id: PLUGIN_NAME,
     version: manifest.version,
     dryRun,
     actions: [
       `copy ${pluginSource} -> ${paths.installPath}`,
-      `write MCP launcher ${MCP_LAUNCHER_COMMAND} -> ${execPath} ${cliPath}`,
+      `register MCP server "${USER_MCP_SERVER_NAME}" in ${paths.userMcpJson}`,
       `register ${PLUGIN_NAME} in ${paths.installedPlugins}`,
       `enable ${PLUGIN_NAME}`,
       'localize hook commands with absolute Node and CLI paths',
@@ -152,15 +168,18 @@ export async function installKimiCodePlugin(options = {}) {
   if (backupPlugin) plan.actions.push(`backup ${paths.installPath} -> ${backupPlugin}`);
   const backupInstalled = await backupOnce(paths.installedPlugins);
   if (backupInstalled) plan.actions.push(`backup ${paths.installedPlugins} -> ${backupInstalled}`);
+  const backupUserMcp = await backupOnce(paths.userMcpJson);
+  if (backupUserMcp) plan.actions.push(`backup ${paths.userMcpJson} -> ${backupUserMcp}`);
 
   await mkdir(paths.managedDir, { recursive: true });
+  // 托管副本必须与源严格一致：先清空再拷贝，避免旧版本残留文件（如已废弃的 launcher）。
+  await rm(paths.installPath, { recursive: true, force: true });
   await cp(pluginSource, paths.installPath, { recursive: true, force: true });
-  const launcherPath = join(paths.installPath, MCP_LAUNCHER_REL);
-  await mkdir(dirname(launcherPath), { recursive: true });
-  await writeFile(launcherPath, renderMcpLauncher({ cliPath, execPath }), 'utf8');
-  await chmod(launcherPath, 0o755);
   const localized = localizeKimiHooks(localizeKimiManifest(manifest), { cliPath, execPath });
   await writeJsonAtomic(join(paths.installPath, 'kimi.plugin.json'), localized);
   await writeJsonAtomic(paths.installedPlugins, installed);
+
+  const existingUserMcp = await readJson(paths.userMcpJson, null);
+  await writeJsonAtomic(paths.userMcpJson, mergeUserMcpConfig(existingUserMcp, userMcpEntry));
   return plan;
 }

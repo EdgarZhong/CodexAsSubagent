@@ -35,7 +35,8 @@
 - [x] 创建 GitHub 私有远端仓库 EdgarZhong/CodexAsSubagent（origin，默认分支 main），`codex/autonomous-v1` 全量 47 提交以 fast-forward 合并至 main 并推送（2026-09-11，用户授权；远端暂只有 main 分支）。
 - [x] Kimi 插件 MCP 工具暴露修复（2026-09-11）：manifest command 硬校验只允许裸命令或 `./` 相对插件根，旧安装器写 node 绝对路径导致 server 被宿主静默丢弃；改为插件内 launcher `bin/cas-run`，真实重装后十工具在 Web 会话全部暴露。
 - [x] 十工具真实 Kimi Web 会话实测（2026-09-11）：spawn/status/wait/steer/interrupt/send/wait_many/read_thread/list_threads/models 全部走通真实 gpt-5.6-luna；两处待对照规格（wait_many 对已消费线程报 `no_active_turn`、read_thread `status:"unknown"`）。
-- [ ] **MCP workspace 错配（当前阻塞，根因已定位未修复）**：Kimi 插件 MCP 以插件目录为 cwd 启动，bootstrap 用 `process.cwd()` 当 workspace → completion 落错 workspace、worker 永不投递、subagent 跑在插件目录。根因链、已排除方案、修复方案 A/B/C 与下一步 SOP 见 docs/autonomous-runs/20260911-1824-kimi-web-e2e-handoff.md。
+- [x] MCP workspace 错配修复（2026-09-11 晚，方案 A 落地）：插件 manifest 不再携带 `mcpServers`，安装器把 MCP 注册到用户级 `~/.kimi-code/mcp.json`（宿主以 workspace.cwd 拉起用户级 stdio MCP，二进制 0.42.0 取证证实）；移除 launcher；bootstrap 检测 cwd 落在 `KIMI_PLUGIN_ROOT` 内 fail-closed。全量回归 149/149，真实 `install` 产物核对通过。
+- [ ] **Kimi Web 模式 E2E 复验（唯一遗留，留给用户在 Kimi Code 执行）**：重启宿主/新开会话 → `lsof -p <MCP pid>` 验证 MCP cwd=workspace → spawn 探针不调 wait 观察 `<codex-completion>` 插队注入 → SQLite 确认 `delivery_state='delivered'` 且 `delivery_id` 带 `kimi-web-` 前缀。SOP 见 docs/autonomous-runs/20260911-1824-kimi-web-e2e-handoff.md §5 与 docs/autonomous-runs/20260911-2100-kimi-web-workspace-mismatch-fix.md。
 
 ### Backlog（V1 未完成项，按优先级）
 
@@ -45,7 +46,7 @@
 - [ ] **真实 ZCode `UserPromptSubmit` 事件端到端注入未验证**：Stop 与 PostToolUse 均已真机验证；UserPromptSubmit 只验证过 wrapper 输出形态。
 - [ ] **MCP server 是否注入 `ZCODE_SESSION_ID` 未确认**：影响 V2 session 隔离的取数方式。
 - [ ] **session 级隔离（V2）**：设计 6.2 末尾，V1 前提是单 workspace 单主会话。
-- [ ] **真实 Kimi Web Server E2E**：工具暴露与十工具实测已于 2026-09-11 完成；Web 主动回流被「MCP workspace 错配」阻塞，移交 docs/autonomous-runs/20260911-1824-kimi-web-e2e-handoff.md 的方案 A/B/C 与 SOP。
+- [ ] **真实 Kimi Web Server E2E**：工具暴露与十工具实测已于 2026-09-11 完成；Web 主动回流的 workspace 错配已修复（决策 20），仅剩用户在 Kimi Code 内的 E2E 复验，SOP 见 docs/autonomous-runs/20260911-2100-kimi-web-workspace-mismatch-fix.md。
 
 ### 明确不做（V1 决定，非遗漏）
 
@@ -99,7 +100,7 @@
     - 本轮实测细节见 docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md。注意：MCP bootstrap 是每会话新建进程，改动需新会话（或重启宿主）才在真实会话生效。
 
 19. Kimi 插件 MCP 工具暴露修复（2026-09-11，实证定案）：kimi 二进制 `normalizePluginMcpServer()` 对插件 manifest 的 MCP `command` 硬校验——只允许裸 PATH 命令或 `./` 开头（相对插件根，且 `isWithin` 限制在插件根内），违者推 warn diagnostic 后**静默丢弃整个 server**（无 spawn、无日志；hooks 走 shell 不受影响，故插件表现为"活着但无工具"）。修复：安装器生成插件内 launcher `bin/cas-run`（`exec <node> <repo>/src/cli/main.mjs "$@"`），manifest command 写 `./bin/cas-run`；对照组为官方插件 kimi-cu 的 `command:"sh", args:["./bin/kimi-cu-mcp"]`。真实重装后十工具在 Web 会话全部暴露并实测通过。
-20. Kimi 插件 MCP workspace 错配（2026-09-11 根因定位，修复方案待新会话验证）：插件 MCP 由宿主以 `cwd = config.cwd ?? pluginRoot` 启动（知识库 §18 描述的 `stdioCwd = workspace.cwd` 只对 workspace 级 MCP 成立，对插件 MCP 不成立），导致 bootstrap 的 `process.cwd()` workspace 全部落错。二进制取证已排除 roots/list（Client 无 capabilities.roots）、manifest cwd（限插件根内）、进程 env（无 session/workspace 变量）、父进程 cwd（全局 Server 不可靠）。已部署 initialize 探针（`<dataDir>/mcp-debug` 标志文件门控，写 `mcp-debug.log`）。候选方案：A=改用 Kimi 用户级 MCP 配置注册（回归 §18 原始设计，推荐）；B=initialize 若携带 workspace 则优先取之；C=上游报缺陷 + 本侧 fail-closed。无论何方案，检测到 cwd 落在 KIMI_PLUGIN_ROOT 内且无法确定 workspace 时必须 fail-closed。详见 docs/autonomous-runs/20260911-1824-kimi-web-e2e-handoff.md。
+20. Kimi 插件 MCP workspace 错配（2026-09-11 根因定位，同日晚方案 A 落地）：插件 MCP 由宿主以 `cwd = config.cwd ?? pluginRoot` 启动，导致 bootstrap 的 `process.cwd()` workspace 全部落错。二进制取证（0.42.0）已排除 roots/list（Client 无 capabilities.roots）、manifest cwd（限插件根内）、进程 env（无 session/workspace 变量）、父进程 cwd（全局 Server 不可靠）。**方案 A 落地（已实现并安装验证）**：取证确认用户级 `~/.kimi-code/mcp.json` 走 `WorkspaceMcpService.stdioCwd = workspace.cwd` → `McpConnectionManager` → `StdioMcpClient(defaultCwd)` 链路，用户级层不设 stdioCwdBase，`config.cwd` 为空时落到 workspace.cwd——即宿主以 workspace 为 cwd 拉起用户级 stdio MCP。实现：(a) `plugins/kimi-code/kimi.plugin.json` 移除 `mcpServers`（插件 manifest 禁止携带 MCP）；(b) `src/install/kimi-code-plugin.mjs` 把 CAS server（node 绝对路径 + `mcp`，startup 60s/tool 520s）合并写入 `$KIMI_CODE_HOME/mcp.json`，保留既有 server、`.bak-cas` 备份、原子写，且托管副本先清空再拷贝（旧 launcher 残留清除）；(c) launcher `bin/cas-run` 随插件 MCP 退出 manifest 而删除；(d) `src/mcp/workspace-context.mjs` 新增 `assertNotInsidePluginRoot`：cwd（含 symlink 规范化）落在 `KIMI_PLUGIN_ROOT` 内时抛 `WorkspaceUnavailableError` fail-closed，杜绝静默用错 workspace。验证：全量回归 149/149、lint/smoke 通过、真实 `install` 产物核对（mcp.json 合并正确、托管 manifest 无 mcpServers/launcher）、真机 fail-closed 复现（插件目录 cwd + KIMI_PLUGIN_ROOT → 明确报错）。**官方 `/plugins install` 路线从此只装 hooks，不含 MCP**（已写入插件 README）。剩余：用户级 E2E 复验（spawn → completion 回流）留给用户在 Kimi Code 执行。详见 docs/autonomous-runs/20260911-2100-kimi-web-workspace-mismatch-fix.md。
 
 ## 执行边界
 

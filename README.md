@@ -95,7 +95,7 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 
 Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP」：改 `plugins/<host>/` 源码 → `install --host=<host>` → 重启宿主 → 验证。
 
-`plugins/kimi-code/` 同时支持 Kimi TUI 和 Web：TUI 用 `PreToolUse`、`Stop`、`UserPromptSubmit` 回流；Web sidecar 发现 `$KIMI_CODE_HOME/server/instances` 中拥有当前 session 的本地 Server，将 completion 作为带稳定 `prompt_id` 的独立 prompt 提交，活动轮次只 steer 该 prompt。Web 请求使用官方 `{code,msg,data}` envelope、`content` text block，并固定 K2.7 模型 `kimi-code/kimi-for-coding`。CLI 安装命令为 `codex-as-subagent install --host=kimi-code`，也支持 `--dry-run --kimi-code-home <path>`；安装后执行 `/reload` 或新开 Kimi session。
+`plugins/kimi-code/` 同时支持 Kimi TUI 和 Web：TUI 用 `PreToolUse`、`Stop`、`UserPromptSubmit` 回流；Web sidecar 发现 `$KIMI_CODE_HOME/server/instances` 中拥有当前 session 的本地 Server，将 completion 作为带稳定 `prompt_id` 的独立 prompt 提交，活动轮次只 steer 该 prompt。Web 请求使用官方 `{code,msg,data}` envelope、`content` text block，并固定 K2.7 模型 `kimi-code/kimi-for-coding`。CLI 安装命令为 `codex-as-subagent install --host=kimi-code`，也支持 `--dry-run --kimi-code-home <path>`；MCP server 由安装器注册到用户级 `$KIMI_CODE_HOME/mcp.json`（宿主以 workspace cwd 拉起用户级 stdio MCP；插件 manifest 携带 MCP 会以插件目录为 cwd，禁止使用）。安装后执行 `/reload` 或新开 Kimi session。
 
 ## 已知限制与未完成项（V1）
 

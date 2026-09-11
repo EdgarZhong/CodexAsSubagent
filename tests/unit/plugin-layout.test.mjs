@@ -43,11 +43,9 @@ test('Kimi plugin uses the official manifest shape and Kimi-only hooks', async (
   assert.equal(manifest.systemPromptPath, './SYSTEM.md');
   assert.equal('mcpConfig' in manifest, false);
   assert.equal('hooksConfig' in manifest, false);
-  const server = manifest.mcpServers?.['codex-as-subagent'];
-  assert.equal(server.command, 'codex-as-subagent');
-  assert.deepEqual(server.args, ['mcp']);
-  assert.ok(server.startupTimeoutMs >= 60_000);
-  assert.ok(server.toolTimeoutMs > 500_000);
+  // 插件 manifest 不携带 mcpServers：宿主会以插件托管目录为 cwd 拉起插件 MCP，
+  // workspace 永远错配；MCP 必须注册在用户级 mcp.json（见 install-kimi-code-plugin）。
+  assert.equal('mcpServers' in manifest, false, '插件 manifest 禁止携带 mcpServers');
   const events = manifest.hooks.map((hook) => hook.event).sort();
   assert.deepEqual(events, ['PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'TurnStarted', 'UserPromptSubmit']);
   for (const hook of manifest.hooks) {
