@@ -1723,7 +1723,7 @@ idle shutdown
 
 选中后记录 `{binary 绝对路径, version, schema hash}`；Server 单次生命周期内绝不切换 binary；每次冷启动重新执行发现与探测（App 自动更新可能在同一路径下替换实现）。全部候选失败时 fail-closed，`doctor` 输出各候选诊断，并建议官方 standalone 安装（`curl -fsSL https://chatgpt.com/codex/install.sh | sh`，支持 `--release X.Y.Z` pin）。
 
-> **未实现项（2026-09-11）**：`doctor` 命令**尚未实现**；探测失败的诊断目前写入 `server.log` 的 `codex.discovery.failed` 事件。详见 CLAUDE.md 任务看板 Backlog。
+> **实现状态（2026-09-11）**：`doctor` 命令已实现为只读诊断入口（`codex-as-subagent doctor`），输出数据目录、config.toml 覆写、startup lock/socket 与 runtime probe 结果；不会清理锁或终止进程。探测失败仍写入 `server.log` 的 `codex.discovery.failed` 事件。
 
 > **实现状态（2026-09-11）**：已落地于 `src/shared/codex-runtime.mjs` 与 `src/cli/serve.mjs`。
 > - `codexBinaryCandidates()` 按上述顺序生成候选取并集（去重）。

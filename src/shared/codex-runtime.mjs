@@ -40,6 +40,7 @@ export const REQUIRED_APP_SERVER_METHODS = Object.freeze([
 ]);
 
 const DEFAULT_APP_SERVER_ARGS = Object.freeze(['app-server']);
+const DEFAULT_DATA_DIR = join(homedir(), '.codex-as-subagent');
 
 // vendor 默认启动参数会让部分 app-server 版本直接退出（CLAUDE.md 决策 12），
 // 因此缺省必须是干净的 `app-server`；仅当显式配置为合法 JSON 字符串数组时才采用。
@@ -56,6 +57,100 @@ export function resolveAppServerArgs(env = process.env) {
     }
   }
   return [...DEFAULT_APP_SERVER_ARGS];
+}
+
+function stripTomlComment(line) {
+  let quote = null;
+  let escaped = false;
+  for (let index = 0; index < line.length; index += 1) {
+    const char = line[index];
+    if (quote === '"' && char === '\\' && !escaped) {
+      escaped = true;
+      continue;
+    }
+    if ((char === '"' || char === "'") && !escaped) {
+      quote = quote === char ? null : (quote ?? char);
+    }
+    if (char === '#' && quote === null) return line.slice(0, index).trim();
+    escaped = false;
+  }
+  return line.trim();
+}
+
+function balancedTomlValue(value) {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) throw new Error('config.toml value must not be empty.');
+  if (trimmed.startsWith('"')) {
+    try {
+      JSON.parse(trimmed);
+      return;
+    } catch {
+      throw new Error('config.toml has an invalid double-quoted value.');
+    }
+  }
+  if (trimmed.startsWith("'")) {
+    if (!trimmed.endsWith("'") || trimmed.length < 2) throw new Error('config.toml has an invalid single-quoted value.');
+    return;
+  }
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    const pairs = { '[': ']', '{': '}' };
+    const closing = pairs[trimmed[0]];
+    if (!trimmed.endsWith(closing)) throw new Error('config.toml has an unclosed array or inline table.');
+    return;
+  }
+  if (!/^(?:true|false|[-+]?\d+(?:\.\d+)?(?:e[-+]?\d+)?|[-+]?inf|nan|[A-Za-z0-9_.-]+)$/i.test(trimmed)) {
+    throw new Error(`config.toml has an invalid value: ${trimmed}`);
+  }
+}
+
+export function parseCodexConfigOverrides(text) {
+  if (typeof text !== 'string') throw new TypeError('config.toml must be text.');
+  const overrides = [];
+  let table = '';
+  for (const [lineNumber, rawLine] of text.split(/\r?\n/).entries()) {
+    const line = stripTomlComment(rawLine);
+    if (!line) continue;
+    if (line.startsWith('[[')) {
+      throw new Error(`config.toml array tables are unsupported at line ${lineNumber + 1}.`);
+    }
+    if (line.startsWith('[')) {
+      if (!line.endsWith(']')) throw new Error(`config.toml table is unclosed at line ${lineNumber + 1}.`);
+      table = line.slice(1, -1).trim();
+      if (!/^[A-Za-z0-9_.-]+$/.test(table)) throw new Error(`config.toml table is invalid at line ${lineNumber + 1}.`);
+      continue;
+    }
+    const assignment = line.match(/^([A-Za-z0-9_.-]+)\s*=\s*(.+)$/);
+    if (!assignment) throw new Error(`config.toml assignment is invalid at line ${lineNumber + 1}.`);
+    const key = table ? `${table}.${assignment[1]}` : assignment[1];
+    const value = assignment[2].trim();
+    balancedTomlValue(value);
+    overrides.push(`${key}=${value}`);
+  }
+  return overrides;
+}
+
+async function readOptionalConfig(configPath, readConfig) {
+  try {
+    return parseCodexConfigOverrides(await readConfig(configPath, 'utf8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+export async function resolveAppServerArgsWithConfig({
+  env = process.env,
+  dataDir = DEFAULT_DATA_DIR,
+  configPath = join(dataDir, 'config.toml'),
+  readConfig = readFile,
+} = {}) {
+  const base = resolveAppServerArgs(env);
+  const overrides = await readOptionalConfig(configPath, readConfig);
+  if (overrides.length === 0) return base;
+  const configArgs = overrides.flatMap((value) => ['-c', value]);
+  const appServerIndex = base.indexOf('app-server');
+  if (appServerIndex < 0) return [...configArgs, ...base];
+  return [...base.slice(0, appServerIndex), ...configArgs, ...base.slice(appServerIndex)];
 }
 
 function isExecutableSync(path) {

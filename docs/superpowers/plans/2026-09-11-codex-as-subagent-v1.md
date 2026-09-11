@@ -1,6 +1,8 @@
 # Codex As Subagent V1 Implementation Plan
 
-> For agentic workers: REQUIRED SUB-SKILL: Use subagent-driven-development to implement this plan task-by-task with a task review after each task and a whole-branch review at the end.
+> 执行说明：常规情况下可使用 `subagent-driven-development` 逐任务实现并审查；本轮因 `AGENTS.md` 的自主执行约束，由主 Agent 单独完成任务审查、集成和全分支复核。
+>
+> 状态同步（2026-09-11）：本轮按仓库 `AGENTS.md` 的自主执行约束由主 Agent 单独完成实现、集成和独立需求审查，不创建子 Agent；以下清单按当前代码、测试、验收记录和提交历史同步。后续 Kimi Code、`config.toml`、`doctor` 扩展见对应专项计划与 `CLAUDE.md`。
 
 Goal: 按详细设计实现可运行的 V1：以 Codex thread 作为 Subagent identity，提供十个公共 MCP 工具、持久 completion-first 交付、workspace 隔离、独立 Runtime 生命周期和 Host Hook。
 
@@ -49,11 +51,11 @@ Files:
 
 Interfaces: Produces package scripts test, lint, smoke; runtime constants DEFAULT_MODEL = gpt-5.6-luna and DEFAULT_EFFORT = xhigh; submodule path vendor/codex-supervisor-mcp.
 
-- [ ] Write a layout test asserting package module mode, required scripts, required directories, submodule path and the three core documents.
-- [ ] Run node --test tests/unit/project-layout.test.mjs; it must fail before scaffolding and pass after it.
-- [ ] Initialize Git on branch codex/autonomous-v1, add the fixed submodule commit, add .gitignore entries for runtime state, .superpowers/sdd/ and .archive/, and make the initial repository commit.
-- [ ] Add working CLI entrypoints that return help and wire npm test, npm run lint, npm run smoke to real commands.
-- [ ] Run npm test, npm run lint and npm run smoke; record exact output in the task report and commit the task.
+- [x] Write a layout test asserting package module mode, required scripts, required directories, submodule path and the three core documents.
+- [x] Run node --test tests/unit/project-layout.test.mjs; it must fail before scaffolding and pass after it.
+- [x] Initialize Git on branch codex/autonomous-v1, add the fixed submodule commit, add .gitignore entries for runtime state, .superpowers/sdd/ and .archive/, and make the initial repository commit.
+- [x] Add working CLI entrypoints that return help and wire npm test, npm run lint, npm run smoke to real commands.
+- [x] Run npm test, npm run lint and npm run smoke; record exact output in the task report and commit the task.
 
 ## Task 2: Supervisor adapter and domain foundation
 
@@ -64,10 +66,10 @@ Files:
 
 Interfaces: createSupervisorAdapter(options), normalizeEvent(event), createHistoryAdapter(adapter), WorkspaceGuard.resolve(cwd), WorkspaceGuard.assertThreadWorkspace(thread, workspace), TerminalResult.fromTerminal(input), TerminalResult.toJSON(), ModelService.resolveSpawn(model?, effort?).
 
-- [ ] Define the fake adapter contract for startThread, resumeThread, startTurn, steerTurn, interruptTurn, listThreads, readThreadMetadata, readRecentTurns, listModels, readEffectiveConfig and subscribeRuntimeEvents.
-- [ ] Test realpath normalization, missing workspace error, cross-workspace fail-closed, model/effort pair resolution, 20-file cap, 16,000-character assistant cap, and completed/failed/interrupted payloads.
-- [ ] Implement normalizers that never expose turnId/event cursor in public projections and obtain changes only from turn-scoped structured records.
-- [ ] Run the three unit test files and commit the domain foundation.
+- [x] Define the fake adapter contract for startThread, resumeThread, startTurn, steerTurn, interruptTurn, listThreads, readThreadMetadata, readRecentTurns, listModels, readEffectiveConfig and subscribeRuntimeEvents.
+- [x] Test realpath normalization, missing workspace error, cross-workspace fail-closed, model/effort pair resolution, 20-file cap, 16,000-character assistant cap, and completed/failed/interrupted payloads.
+- [x] Implement normalizers that never expose turnId/event cursor in public projections and obtain changes only from turn-scoped structured records.
+- [x] Run the three unit test files and commit the domain foundation.
 
 ## Task 3: Durable SQLite state and completion router
 
@@ -77,10 +79,10 @@ Files:
 
 Interfaces: SqliteStore.open(dataDir), createExecution(), reserveDirect(), releaseReservation(), insertCompletionFirst(), claimPendingHook(), ackDelivery(), requeueExpiredLeases(), CompletionRouter.onTerminal(event).
 
-- [ ] Create meta, executions and completions tables with the specified primary/unique keys and pending workspace index; set WAL, FULL synchronous, busy timeout 5000 and foreign keys.
-- [ ] Test terminal-first transaction, duplicate thread_id/turn_id idempotency, pending/direct/hook/delivered transitions, 30-second lease requeue, direct compare-and-set and two racing Hooks where only one claims.
-- [ ] Implement short transactions only; no transaction may wait for a 500-second operation or hold a delivery lock while writing stdout.
-- [ ] Run unit tests including a pre-existing dirty-file fixture proving no Git diff is queried, then commit.
+- [x] Create meta, executions and completions tables with the specified primary/unique keys and pending workspace index; set WAL, FULL synchronous, busy timeout 5000 and foreign keys.
+- [x] Test terminal-first transaction, duplicate thread_id/turn_id idempotency, pending/direct/hook/delivered transitions, 30-second lease requeue, direct compare-and-set and two racing Hooks where only one claims.
+- [x] Implement short transactions only; no transaction may wait for a 500-second operation or hold a delivery lock while writing stdout.
+- [x] Run unit tests including a pre-existing dirty-file fixture proving no Git diff is queried, then commit.
 
 ## Task 4: RuntimeManager and execution control
 
@@ -91,10 +93,10 @@ Files:
 
 Interfaces: RuntimeManager.spawn(ctx, input), send(ctx, input), steer(ctx, input), status(ctx, threadId), wait(ctx, threadId), waitMany(ctx, threads), interrupt(ctx, threadId), listThreads(ctx), readThread(ctx, threadId), models(ctx).
 
-- [ ] Test spawn immediate ACK, idle send resume, busy send rejection, steer active/idle, interrupt ACK without terminal, terminal before wait, wait reservation before terminal, timeout without interrupt and current-workspace filtering.
-- [ ] Implement one active execution per thread with model/effort persistence, status snapshots capped at 200/600 chars, in-memory waiter notification backed by SQLite completion state, and synthetic errors for unavailable history/model.
-- [ ] Implement wait_many snapshot semantics: all captures active threads at call time; completed results remain claimed_direct until the whole response is acknowledged; timeout releases unfinished reservations.
-- [ ] Run unit and integration tests and commit.
+- [x] Test spawn immediate ACK, idle send resume, busy send rejection, steer active/idle, interrupt ACK without terminal, terminal before wait, wait reservation before terminal, timeout without interrupt and current-workspace filtering.
+- [x] Implement one active execution per thread with model/effort persistence, status snapshots capped at 200/600 chars, in-memory waiter notification backed by SQLite completion state, and synthetic errors for unavailable history/model.
+- [x] Implement wait_many snapshot semantics: all captures active threads at call time; completed results remain claimed_direct until the whole response is acknowledged; timeout releases unfinished reservations.
+- [x] Run unit and integration tests and commit.
 
 ## Task 5: Runtime Server, Bootstrap, lifecycle and recovery
 
@@ -105,10 +107,10 @@ Files:
 
 Interfaces: RuntimeServer.listen(socketPath), RuntimeServer.handle(request), RuntimeServer.close(), ensureServer(options), StdioBootstrap.run(), LifecycleManager.noteRequestStart(), LifecycleManager.noteRequestEnd(), LifecycleManager.maybeShutdown(), recoverState().
 
-- [ ] Test multiple Bootstrap activations yielding one Server, stale socket/lock handling, Host disconnect during wait leaving Codex active, pending completion allowing shutdown, active execution preventing shutdown and idle shutdown after 3000ms.
-- [ ] Implement newline-delimited JSON-RPC over Unix socket with request correlation, hidden direct delivery id kept internal, ACK/NACK transitions, startup lock with PID/instance health check, detached Server activation and workspace context extraction from canonical CWD only.
-- [ ] Implement app-server crash synthetic app_server_crash, Server crash reconciliation to real terminal or supervisor_crash and conservative orphan PID identity checks.
-- [ ] Run integration tests and CLI smoke, then commit.
+- [x] Test multiple Bootstrap activations yielding one Server, stale socket/lock handling, Host disconnect during wait leaving Codex active, pending completion allowing shutdown, active execution preventing shutdown and idle shutdown after 3000ms.
+- [x] Implement newline-delimited JSON-RPC over Unix socket with request correlation, hidden direct delivery id kept internal, ACK/NACK transitions, startup lock with PID/instance health check, detached Server activation and workspace context extraction from canonical CWD only.
+- [x] Implement app-server crash synthetic app_server_crash, Server crash reconciliation to real terminal or supervisor_crash and conservative orphan PID identity checks.
+- [x] Run integration tests and CLI smoke, then commit.
 
 ## Task 6: MCP public façade and ten tools
 
@@ -120,10 +122,10 @@ Files:
 
 Interfaces: TOOL_DEFINITIONS containing exactly ten tools, handleToolCall(name, args, ctx), projectSpawnAck, projectStatus, projectTerminalResult, projectWaitMany.
 
-- [ ] Test exact input schemas and output projections for all ten tools; reject cwd, sandbox, approval, cursor and turnId arguments.
-- [ ] Implement compact public responses matching the design, preserving error types invalid_model, invalid_effort, default_model_unavailable, thread_busy, thread_not_found, thread_workspace_mismatch, no_active_turn, history_unavailable and workspace_unavailable.
-- [ ] Ensure no public response contains internal deliveryId, turnId, event cursor, raw events, approval data or arbitrary Codex config.
-- [ ] Run schema and integration tests plus npm run smoke, then commit.
+- [x] Test exact input schemas and output projections for all ten tools; reject cwd, sandbox, approval, cursor and turnId arguments.
+- [x] Implement compact public responses matching the design, preserving error types invalid_model, invalid_effort, default_model_unavailable, thread_busy, thread_not_found, thread_workspace_mismatch, no_active_turn, history_unavailable and workspace_unavailable.
+- [x] Ensure no public response contains internal deliveryId, turnId, event cursor, raw events, approval data or arbitrary Codex config.
+- [x] Run schema and integration tests plus npm run smoke, then commit.
 
 ## Task 7: Hook delivery and Host adapters
 
@@ -135,10 +137,10 @@ Files:
 
 Interfaces: drainPending({workspace, host, store}), renderCompletions(completions, host), each Host wrapper wrap(text, completions).
 
-- [ ] Test claim-before-render, successful delivery ACK, crash after claim with expired lease restoring pending, duplicate completionId visibility, workspace filtering and host-specific wrapper isolation.
-- [ ] Implement codex-as-subagent hook --host=host and codex-as-subagent drain; Hook only canonicalizes workspace, claims pending rows, renders results and ACKs/NACKs delivery. It never starts/resumes/interrupts Codex.
-- [ ] Keep all Host registration under plugins/; provide complete ZCode config and readable install notes without duplicating Runtime logic.
-- [ ] Run Hook/plugin tests and commit.
+- [x] Test claim-before-render, successful delivery ACK, crash after claim with expired lease restoring pending, duplicate completionId visibility, workspace filtering and host-specific wrapper isolation.
+- [x] Implement codex-as-subagent hook --host=host and codex-as-subagent drain; Hook only canonicalizes workspace, claims pending rows, renders results and ACKs/NACKs delivery. It never starts/resumes/interrupts Codex.
+- [x] Keep all Host registration under plugins/; provide complete ZCode config and readable install notes without duplicating Runtime logic.
+- [x] Run Hook/plugin tests and commit.
 
 ## Task 8: Full regression, independent review and user acceptance
 
@@ -148,11 +150,11 @@ Files:
 
 Interfaces: npm test, npm run lint, npm run smoke and the documented user acceptance commands.
 
-- [ ] Run all tests and static checks; fix failures within existing task boundaries and record evidence.
-- [ ] Execute every required user path: spawn async; parallel threads; send/steer/interrupt; workspace normalization/rejection; wait and wait_many including timeout; completion-first; Hook claim/race/lease; Host exit; Server/app-server crash recovery; lazy activation/stale lock; pre-existing dirty Git files; model resolution; ZCode plugin inspection.
-- [ ] Record expected result, actual result, command/input and evidence for each path in the autonomous-run record.
-- [ ] Dispatch the most capable independent whole-branch reviewer against the review package; address findings in one reviewed fix wave or record bounded rulings.
-- [ ] Run final verification and commit the acceptance record.
+- [x] Run all tests and static checks; fix failures within existing task boundaries and record evidence.
+- [x] Execute every required user path: spawn async; parallel threads; send/steer/interrupt; workspace normalization/rejection; wait and wait_many including timeout; completion-first; Hook claim/race/lease; Host exit; Server/app-server crash recovery; lazy activation/stale lock; pre-existing dirty Git files; model resolution; ZCode plugin inspection.
+- [x] Record expected result, actual result, command/input and evidence for each path in the autonomous-run record.
+- [x] Complete an independent whole-branch requirements review as the main Agent under the autonomous-execution rule; address Critical/Important findings and record bounded residual risks.
+- [x] Run final verification and commit the acceptance record.
 
 ## Completion Criteria
 

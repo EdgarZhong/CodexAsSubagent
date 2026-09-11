@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import {
@@ -7,6 +10,8 @@ import {
   discoverCodexBinary,
   probeCodexRuntime,
   resolveAppServerArgs,
+  parseCodexConfigOverrides,
+  resolveAppServerArgsWithConfig,
 } from '../../src/shared/codex-runtime.mjs';
 
 const SCHEMA_OK = JSON.stringify({ defs: REQUIRED_APP_SERVER_METHODS });
@@ -43,6 +48,37 @@ test('resolveAppServerArgs never relies on vendor defaults that break app-server
   assert.deepEqual(resolveAppServerArgs({ CODEX_APP_SERVER_ARGS: 'not-json' }), ['app-server']);
   assert.deepEqual(resolveAppServerArgs({ CODEX_APP_SERVER_ARGS: '[]' }), ['app-server']);
   assert.deepEqual(resolveAppServerArgs({ CODEX_APP_SERVER_ARGS: '"app-server"' }), ['app-server']);
+});
+
+test('parseCodexConfigOverrides translates flat keys and TOML tables without Server settings', () => {
+  assert.deepEqual(parseCodexConfigOverrides(`
+    # Subagent-only Codex config
+    model = "gpt-5.6-luna" # inline comment
+    model_reasoning_effort = "xhigh"
+    [features]
+    shell_tool = true
+  `), [
+    'model="gpt-5.6-luna"',
+    'model_reasoning_effort="xhigh"',
+    'features.shell_tool=true',
+  ]);
+});
+
+test('resolveAppServerArgsWithConfig inserts -c overrides before app-server and ignores a missing file', async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'cas-config-'));
+  t.after(async () => { await rm(dataDir, { recursive: true, force: true }); });
+  assert.deepEqual(await resolveAppServerArgsWithConfig({ dataDir, env: {} }), ['app-server']);
+  await writeFile(join(dataDir, 'config.toml'), 'model = "gpt-5.6-luna"\nmodel_reasoning_effort = "xhigh"\n');
+  assert.deepEqual(await resolveAppServerArgsWithConfig({ dataDir, env: {} }), [
+    '-c', 'model="gpt-5.6-luna"',
+    '-c', 'model_reasoning_effort="xhigh"',
+    'app-server',
+  ]);
+});
+
+test('config parser fails closed on malformed assignments', () => {
+  assert.throws(() => parseCodexConfigOverrides('model =\n'), /assignment|value/);
+  assert.throws(() => parseCodexConfigOverrides('[[]\nmodel = true\n'), /table/);
 });
 
 // 下面这组是 server 启动自主发现的核心行为：预设绝对路径 + probe，逐候选推进。

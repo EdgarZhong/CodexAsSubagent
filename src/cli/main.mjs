@@ -3,18 +3,22 @@
 import { DEFAULT_EFFORT, DEFAULT_MODEL } from '../shared/constants.mjs';
 import { resolve } from 'node:path';
 import { realpathSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { serve } from './serve.mjs';
 import { mcp } from './mcp.mjs';
 import { hook } from './hook.mjs';
 import { drain } from './drain.mjs';
 import { install } from './install.mjs';
+import { runKimiWebCli } from './kimi-web.mjs';
+import { doctor } from './doctor.mjs';
 
 const commands = [
   ['serve', '启动 Runtime Server'],
   ['mcp', '启动 MCP stdio Bootstrap'],
   ['hook', '运行 Host Hook wrapper'],
   ['drain', '读取并交付待处理 completion'],
+  ['kimi-web', '连接 Kimi Web session 并回流 completion'],
+  ['doctor', '诊断数据目录、配置、锁和 Codex runtime'],
   ['install', '把 Host 插件安装到本机插件缓存']
 ];
 
@@ -68,6 +72,8 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === 'mcp') return await mcp(argv.slice(1));
   if (command === 'hook') return await hook(argv.slice(1));
   if (command === 'drain') return await drain(argv.slice(1));
+  if (command === 'kimi-web') return await runKimiWebCli(argv.slice(1), { cliPath: fileURLToPath(import.meta.url) });
+  if (command === 'doctor') return await doctor(argv.slice(1));
   if (command === 'install') return await install(argv.slice(1));
 
   console.error(`未知命令: ${command}`);

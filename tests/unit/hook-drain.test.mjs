@@ -135,3 +135,15 @@ test('drainPending can write through a backpressure-aware stream', async () => {
   assert.equal(result.acknowledged, true);
   assert.match(chunks.join(''), /stream-completion/);
 });
+
+test('Kimi blockable hooks explain that the original tool was not executed', () => {
+  const completion = row('kimi-completion');
+  const preTool = renderCompletions([completion], 'kimi-code', { event: 'PreToolUse' });
+  assert.match(preTool, /original tool call has NOT been executed/i);
+  assert.match(preTool, /<codex-completion>/);
+  const stop = renderCompletions([completion], 'kimi-code', { event: 'Stop' });
+  assert.match(stop, /before ending this turn/i);
+  const userPrompt = renderCompletions([completion], 'kimi-code', { event: 'UserPromptSubmit' });
+  assert.doesNotMatch(userPrompt, /NOT been executed/i);
+  assert.match(userPrompt, /<codex-completion>/);
+});

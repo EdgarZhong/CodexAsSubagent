@@ -28,16 +28,19 @@ export async function hook(argv = [], { stdout = process.stdout, stdin = process
   const event = input.hook_event_name ?? input.hookEventName;
   const workspace = option(argv, '--workspace', input.cwd ?? process.cwd());
   const dataDir = option(argv, '--data-dir', DEFAULT_DATA_DIR);
+  const host = option(argv, '--host', 'plain');
+  const blockKimiEvent = host === 'kimi-code' && (event === 'PreToolUse' || event === 'Stop');
   try {
     const store = openSqliteStore(dataDir);
     try {
-      await drainPending({
+      const result = await drainPending({
         workspace,
-        host: option(argv, '--host', 'plain'),
+        host,
         store: createCompletionStore(store),
-        output: stdout,
+        output: blockKimiEvent ? stderr : stdout,
         context: { event },
       });
+      return blockKimiEvent && result.count > 0 ? 2 : 0;
     } finally {
       store.close();
     }

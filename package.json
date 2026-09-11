@@ -12,9 +12,11 @@
   },
   "scripts": {
     "test": "node --test 'tests/**/*.test.mjs'",
-    "lint": "node --check src/cli/main.mjs",
+    "lint": "find src -type f -name '*.mjs' -print0 | xargs -0 -n1 node --check",
     "smoke": "./src/cli/main.mjs --help",
     "install:zcode": "./src/cli/main.mjs install --host=zcode",
-    "install:zcode:dry": "./src/cli/main.mjs install --host=zcode --dry-run"
+    "install:zcode:dry": "./src/cli/main.mjs install --host=zcode --dry-run",
+    "install:kimi-code": "./src/cli/main.mjs install --host=kimi-code",
+    "install:kimi-code:dry": "./src/cli/main.mjs install --host=kimi-code --dry-run"
   }
 }

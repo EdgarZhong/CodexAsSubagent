@@ -1,0 +1,54 @@
+{
+  "name": "codex-as-subagent",
+  "version": "0.1.0",
+  "description": "将本机 Codex subagent runtime 注册到 Kimi Code，并回流异步 completion。",
+  "keywords": ["codex", "subagent", "mcp", "hooks"],
+  "author": "EdgarZhong",
+  "license": "MIT",
+  "systemPromptPath": "./SYSTEM.md",
+  "interface": {
+    "displayName": "Codex As Subagent",
+    "shortDescription": "在 Kimi Code 中调用本机 Codex subagent，并接收异步完成结果。",
+    "developerName": "EdgarZhong"
+  },
+  "mcpServers": {
+    "codex-as-subagent": {
+      "command": "codex-as-subagent",
+      "args": ["mcp"],
+      "startupTimeoutMs": 60000,
+      "toolTimeoutMs": 520000
+    }
+  },
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "command": "codex-as-subagent hook --host=kimi-code",
+      "timeout": 30
+    },
+    {
+      "event": "Stop",
+      "command": "codex-as-subagent hook --host=kimi-code",
+      "timeout": 30
+    },
+    {
+      "event": "UserPromptSubmit",
+      "command": "codex-as-subagent hook --host=kimi-code",
+      "timeout": 30
+    },
+    {
+      "event": "SessionStart",
+      "command": "codex-as-subagent kimi-web --attach",
+      "timeout": 10
+    },
+    {
+      "event": "TurnStarted",
+      "command": "codex-as-subagent kimi-web --attach",
+      "timeout": 10
+    },
+    {
+      "event": "SessionEnd",
+      "command": "codex-as-subagent kimi-web --detach",
+      "timeout": 10
+    }
+  ]
+}

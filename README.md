@@ -50,7 +50,7 @@ Bootstrap 只负责取得当前 workspace、lazy-start Server、转发请求和 
     ├── mcp/                  # stdio Bootstrap、工具注册、响应投影
     ├── hook/                 # completion drain 与 Host 薄封装（hosts/ 放各 Host 封装）
     ├── install/              # Host 插件安装器（拷贝资源、本地化命令、注册 marketplace）
-    ├── cli/                  # serve、mcp、hook、drain、install 命令
+    ├── cli/                  # serve、mcp、hook、drain、kimi-web、install 命令
     └── shared/               # 常量、错误、协议工具、argv、Codex runtime 发现、日志
     plugins/                  # Host 资源源文件（MCP/Hook 注册、manifest），唯一真源
     vendor/                   # Git Submodule
@@ -60,7 +60,7 @@ Bootstrap 只负责取得当前 workspace、lazy-start Server、转发请求和 
 ## 运行环境与命令
 
 - Node.js >=24.0.0，使用 ESM。
-- 持久目录默认为 ~/.codex-as-subagent/，包含 state.sqlite、Unix socket、锁和 server.log。`config.toml`（可选，对 Codex 配置的增量覆写，只含 Codex 键，见详细设计 6.3/6.4）**当前尚未实现读取**，属规划项。
+- 持久目录默认为 ~/.codex-as-subagent/，包含 state.sqlite、Unix socket、锁和 server.log。`config.toml`（可选，对 Codex 配置的增量覆写，只含 Codex 键，见详细设计 6.3/6.4）会在 Server 冷启动时翻译为 `-c key=value` 并插入 `app-server` 参数之前；文件不存在不覆写，格式错误 fail-closed。参考 [config.example.toml](config.example.toml)。
 - Codex 自有认证、profile、transcript 仍位于 ~/.codex/，不复制到本项目数据库。
 - 默认 dedicated Codex profile：gpt-5.6-luna + xhigh。Server 冷启动时按设计 6.4 自动发现 Codex app-server 运行时（`CODEX_BIN` env 优先），无需手工配置路径。
 
@@ -68,6 +68,8 @@ Bootstrap 只负责取得当前 workspace、lazy-start Server、转发请求和 
     npm test
     npm run lint
     npm run smoke
+    npm run install:kimi-code:dry
+    node src/cli/main.mjs doctor --json
     node src/cli/main.mjs --help
 
 运行前需要本机已登录 Codex，并具备可用的 Codex app-server。没有 Hook 能力的 Host 仍可使用 wait、wait_many、status 和 read_thread。
@@ -80,7 +82,7 @@ V1 固定公开以下十个工具：codex_spawn、codex_send、codex_steer、cod
 
 codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500 秒；工具不接受 cwd/workspace/sandbox/approval/event cursor/turnId 参数。当前 Host 的 canonical CWD 是唯一 workspace 边界。
 
-## Hook 与 ZCode 插件
+## Hook 与 Host 插件
 
 `codex-as-subagent hook --host=<host>` 从当前 canonical workspace 的 SQLite completion buffer 原子 claim pending completion，渲染后 ACK；`codex-as-subagent drain` 提供宿主无关的 plain 输出。Hook 不启动、恢复或中断 Codex thread。`--host` 同时接受 `--host=zcode` 与 `--host zcode` 两种写法。
 
@@ -93,6 +95,8 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 
 Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP」：改 `plugins/<host>/` 源码 → `install --host=<host>` → 重启宿主 → 验证。
 
+`plugins/kimi-code/` 同时支持 Kimi TUI 和 Web：TUI 用 `PreToolUse`、`Stop`、`UserPromptSubmit` 回流；Web sidecar 发现 `$KIMI_CODE_HOME/server/instances` 中拥有当前 session 的本地 Server，将 completion 作为带稳定 `prompt_id` 的独立 prompt 提交，活动轮次只 steer 该 prompt。Web 请求使用官方 `{code,msg,data}` envelope、`content` text block，并固定 K2.7 模型 `kimi-code/kimi-for-coding`。CLI 安装命令为 `codex-as-subagent install --host=kimi-code`，也支持 `--dry-run --kimi-code-home <path>`；安装后执行 `/reload` 或新开 Kimi session。
+
 ## 已知限制与未完成项（V1）
 
 **使用前提与限制**
@@ -103,13 +107,12 @@ Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP�
 
 **尚未完成（V1 Backlog，权威清单见 CLAUDE.md 任务看板）**
 
-- **`config.toml` 增量覆写未实现**（无代码读取），属设计 6.3/6.4 已承诺但未落地项。
-- **`npm run lint` 只做单文件语法检查**（`node --check src/cli/main.mjs`），不覆盖全量源码，也无 ESLint 规则。
 - **`tests/e2e/` 与 `tests/fixtures/` 为空占位**；真实端到端目前靠 `docs/autonomous-runs/` 的手工验收路径，缺可重复执行的自动化 E2E。
-- **`doctor` 命令未实现**（设计 6.4 提及）。
 - **开源一键安装在 Host 子进程 PATH 中的发现方案未定**：ZCode 插件 update 会从源目录重同步覆盖命令本地化。
 - **真实 `status=failed` 的 turn 路径**未单独构造验证（仅经 recovery 合成 failed 验证过）。
 - **真实 ZCode `UserPromptSubmit` 事件的端到端注入未验证**（Stop/PostToolUse 已真机验证）。
+- **真实 Kimi Web Server API 端到端路径未在本机执行**：确定性测试和临时 SQLite 集成已覆盖 discovery、prompt/steer、lease/ACK；真实路径需要当前 Kimi Code 本地 Server、session 和 token。
+- **Kimi Web Server API 属于 experimental**：运行时以实例 API 的 session/workspace 校验为准；Server 消失时不 ACK，completion 留在 lease/retry 路径。
 
 **明确不做（V1 决定）**
 
@@ -136,10 +139,13 @@ Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP�
 | docs/superpowers/plans/2026-09-11-codex-as-subagent-v1.md | 本轮实现计划、接口和测试任务 |
 | docs/autonomous-runs/ | 用户级验收快照与结果 |
 | docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md | 十工具真实 ZCode 会话 E2E、PostToolUse 中途回流与中断协议修复（2026-09-11） |
+| docs/autonomous-runs/20260911-1701-kimi-code-integration.md | Kimi Code TUI/Web 插件、安装器与 completion 回流验收 |
 | docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md | ZCode 插件真实路径验收：4 处缺陷修复与 Hook 回流打通（2026-09-11） |
 | docs/research/2026-09-11-codex-runtime-discovery.md | Codex 安装形态、认证共享与 app-server 协议外部调研（2026-09-11） |
 | docs/research/2026-09-11-zcode-hook-protocol.md | ZCode Hook/MCP/插件协议逆向取证调研（2026-09-11） |
 | plugins/zcode/README.md | ZCode MCP/Hook 插件安装说明 |
+| plugins/kimi-code/README.md | Kimi Code TUI/Web MCP、Hook、sidecar 与安装说明 |
+| docs/Codex As Subagent × Kimi Code — 主动回流设计定稿与集成参考知识库.md | Kimi Code 回流设计、官方 API 字段与取证依据 |
 
 ## 许可证
 

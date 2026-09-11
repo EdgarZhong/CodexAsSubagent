@@ -14,7 +14,7 @@ import { createRuntimeServer } from '../server/server.mjs';
 import { recoverState } from '../server/recovery.mjs';
 import { createServerLogger } from '../shared/server-log.mjs';
 import { option } from '../shared/argv.mjs';
-import { probeCodexRuntime } from '../shared/codex-runtime.mjs';
+import { probeCodexRuntime, resolveAppServerArgsWithConfig } from '../shared/codex-runtime.mjs';
 
 export async function serve(argv = []) {
   const dataDir = option(argv, '--data-dir', DEFAULT_DATA_DIR);
@@ -26,7 +26,8 @@ export async function serve(argv = []) {
 
   // 设计 6.4：每次冷启动都重新发现 Codex runtime（App 自动更新可能替换同路径实现），
   // 探测通过后本次生命周期内固定该 binary，绝不中途切换。
-  const { selected, diagnostics } = await probeCodexRuntime();
+  const appServerArgs = await resolveAppServerArgsWithConfig({ dataDir });
+  const { selected, diagnostics } = await probeCodexRuntime({ args: appServerArgs });
   if (!selected) {
     const detail = diagnostics.map((entry) => `${entry.candidate}: ${entry.ok ? 'ok' : entry.reason}`).join('; ');
     logger.error('codex.discovery.failed', { diagnostics });
