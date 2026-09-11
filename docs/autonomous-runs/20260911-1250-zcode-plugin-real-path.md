@@ -63,6 +63,7 @@
 2. **真实 spawn + 脚本触发 Hook**：真实 gpt-5.6-luna 子 agent（不 wait）→ completion `pending` → `hook --host=zcode`（stdin 传 Stop payload）输出严格 JSON `{"additionalContext":"...PROD-HOOK-OK","decision":"block","reason":"..."}`，completion 转 `delivered`。
 3. **本会话真实 Stop hook 端到端回流（最关键）**：留一条真实子 agent completion 处于 `pending`（消息 `LIVE-STOP-HOOK-OK`）后结束本轮。ZCode 会话**自身的 Stop hook 自动执行**了 `hook --host=zcode`，将 completion 作为 `additionalContext` 注入（并带 `decision:block` 触发续轮），completion 于 `2026-09-11T04:53:04Z` 转 `delivered`。这是不经任何脚本模拟、由 Host 真实驱动 `spawn 异步 → completion 落盘 → Stop hook 自动回流 → 续轮` 的完整用户路径实证。
 4. **环境自清理**：验证后无残留 serve、无残留 app-server，executions 归零。
+5. **同会话内直接调工具的最终实证**：由模型在 ZCode 会话中**直接调用 MCP 工具** `codex_spawn`（非脚本驱动独立进程）起真实子 agent（threadId `01a08ed1-d8e6-7a00-8e37-2c5a15c617b3`，gpt-5.6-luna），不调用 `codex_wait`；子 agent 完成后 completion 留 `pending`，本轮结束时本会话 Stop hook 自动 drain 注入（`additionalContext` = `IN-SESSION-TOOL-OK`），completion 于 `2026-09-11T04:56:04Z` 转 `delivered`。至此「同一会话内：模型调工具 spawn → 子 agent 完成落盘 → Stop hook 自动回流 → 模型续轮」闭环成立。
 
 ## 遗留风险与后续
 
