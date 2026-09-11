@@ -117,4 +117,11 @@ NOTIF: {"method":"turn/completed","params":{"threadId":"...","turn":{"id":"...",
 
 附带问题：`asDomainError` 只要有 `error.code` 就原样透传，导致上游 raw message 漏给模型、code 落为 `internal_error`。已在 CLAUDE.md 决策 18 记录修复计划。
 
+### 影响面与可见性（同日追加取证）
+
+- **失败仅限变更类操作**：`codex_send`/`codex_steer`/`codex_interrupt` 对锁定线程失败；只读操作不受影响 —— 实测对锁定线程 `codex_status`/`codex_read_thread` 均正常返回。
+- **协议层看不到锁**：`generate-json-schema` 中 `Thread` 无任何锁字段，`ThreadStatus` 仅 `notLoaded|idle|systemError|active`（内部运行状态，非跨进程写锁）。因此 `thread/list` 无法通过协议字段暴露锁状态。
+- **本地 flock 探测无法区分"自己 vs 他人"**：Codex app-server 对 thread 的写锁是"打开即持有、独占、持久"的模型。实测：本 Server 自己新建的线程在 turn 完成后，锁**仍被本 Server 的 app-server 持有**（`lsof` 归属本进程），而 `codex_send` 依然成功。故若仅用 `flock` 探测"是否被锁"来标记线程，会把**自己完全可用的线程也误标为被占用**。
+- 结论：要正确暴露"他人占用"，探测必须进一步判定持有锁的 PID 是否属于**另一个** Codex 客户端（比对 pid 及其父进程链，排除自身 app-server）。仅在"同机、同 `~/.codex`"前提下有意义。
+
 
