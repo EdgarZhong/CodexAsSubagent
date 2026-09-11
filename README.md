@@ -88,7 +88,9 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 安装提供两种并存方式：
 
 - **方式 A（ZCode GUI 标准路径）**：确保 `codex-as-subagent` 落在 GUI 子进程 PATH 中（如 `npm install -g .`），再用 ZCode 的 Discover 标签页添加本仓库为 marketplace 并 Install。详见 [plugins/zcode/README.md](plugins/zcode/README.md)。
-- **方式 B（CLI 一键）**：`codex-as-subagent install --host=zcode`，把插件拷贝进 ZCode 缓存、本地化为绝对路径命令、注册 marketplace 并启用；支持 `--dry-run`。
+- **方式 B（CLI 一键）**：`codex-as-subagent install --host=zcode`（或 `npm run install:zcode`），把插件拷贝进 ZCode 缓存、本地化为绝对路径命令、注册 marketplace 并启用；支持 `--dry-run`。
+
+Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP」：改 `plugins/<host>/` 源码 → `install --host=<host>` → 重启宿主 → 验证。
 
 ## 开发测试闭环
 

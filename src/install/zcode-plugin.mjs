@@ -201,7 +201,7 @@ export async function installZcodePlugin(options = {}) {
   const installed = await readJson(paths.installedPlugins, { version: 1, plugins: [] });
   installed.version ??= 1;
   installed.plugins ??= [];
-  plan.actions.push(`register plugin ${id}@${version}`);
+  plan.actions.push(`register plugin ${id} (v${version})`);
   upsertById(installed.plugins, {
     id,
     name: PLUGIN_NAME,
