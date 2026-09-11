@@ -3,8 +3,8 @@
 ## 当前阶段
 
 - 目标：按 docs/Codex As Subagent — 详细设计与编码规格.md 自主交付尽可能完整的 V1，并形成可运行、可测试、可继续演进的 Git 仓库。
-- 阶段：Task 1-8 已完成；V1 验收完成；ZCode 插件协议已按真实 bundle 取证修复；真实 Codex app-server E2E（spawn/wait/status，gpt-5.6-luna 真实模型调用）已于 2026-09-11 通过，见 docs/autonomous-runs/20260911-1206-real-codex-e2e.md。
-- 下一步候选：ZCode 插件运行态实证（安装插件 + 真实 Hook 回流）；Runtime 自动发现/probe 模块实现（设计 6.4 已定稿）；真实 send/steer/interrupt 与 crash recovery 路径；session 级隔离（V2，设计 6.2 末尾）。
+- 阶段：Task 1-8 已完成；V1 验收完成；ZCode 插件协议已按真实 bundle 取证修复；真实 Codex app-server E2E（spawn/wait/status，gpt-5.6-luna 真实模型调用）已于 2026-09-11 通过，见 docs/autonomous-runs/20260911-1206-real-codex-e2e.md。插件已用标准 ZCode marketplace 方式装入本机并启用，MCP bootstrap 由 ZCode GUI 会话拉起（进程链 `node src/cli/main.mjs mcp` ← `zcode-cli` ← `zcode-host-local-1`）。2026-09-11 真实插件路径实测暴露并修复 4 处缺陷，Hook 回流端到端打通，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。
+- 下一步候选：Runtime 自动发现/probe 模块实现（设计 6.4 已定稿）；真实 send/steer/interrupt 与 crash recovery 路径；config.toml 增量覆写实现（当前零代码读取）；插件命令在 GUI 子进程 PATH 中的可行性（开源一键安装需保证 `codex-as-subagent` 可被 Host 发现，或改用 `node` + 解析后的绝对路径，且 ZCode 插件 update 会从源目录重同步覆盖本地化 patch）；session 级隔离（V2，设计 6.2 末尾）。
 - 基线：2026-09-11，已完成 Git 分支、package manifest、CLI/共享常量、源码与测试目录骨架及 pinned Submodule。
 - 默认裁决：使用 Node.js ESM 与内置 node:sqlite；以 fake/in-memory Supervisor Adapter 支撑确定性单元测试，同时保留真实上游 Adapter 接口。
 
@@ -21,6 +21,8 @@
 - [x] 实现 Hook drain、lease 恢复和 Host wrapper；补齐 ZCode 插件配置。
 - [x] 完成 unit/integration/smoke 回归、主 Agent 需求审查和用户级验收记录；真实外部 E2E 限制已明确记录。
 - [x] 自主执行 git commit；不执行 push、发布或跨工作区合并。
+- [x] 以标准 marketplace 方式把 ZCode 插件装入本机、启用，并确认 GUI 会话拉起 MCP bootstrap。
+- [x] 真实插件路径实测并修复 4 处缺陷（--data-dir 透传、adapter 未终止 app-server、idle shutdown 未触发、Hook 参数解析导致输出非 JSON）；Hook 回流端到端打通。
 
 ## 当前动态决策
 
@@ -37,6 +39,11 @@
 11. Runtime 自动发现定稿（2026-09-11，依据调研 docs/research/2026-09-11-codex-runtime-discovery.md）：解析顺序 `CODEX_BIN` env > PATH > standalone managed（`~/.codex/packages/standalone/current/bin/codex`）> `~/.local/bin/codex` > Homebrew 已知路径 > ChatGPT.app 内嵌 > 旧 Codex.app 内嵌；不扫描 IDE 私有 runtime，不按版本号排序。发现目标是"满足 stable app-server contract 的 runtime"：realpath 去重 + `--version` + `generate-json-schema` 必需 method 检查 + ephemeral initialize 冒烟；记录 {binary, version, schema hash}；Server 单次生命周期不切换 binary，每次冷启动重新探测。永远自起 app-server 子进程，不 attach Desktop/managed daemon。调研推翻点：app-server 下 `-p` named profile 不可靠，覆写只走 `-c`；调研证实点：认证/配置经 `CODEX_HOME` 共享，App 登录后 CLI 无需再登录。
 12. 真实 app-server 冒烟（2026-09-11 通过）：ChatGPT.app 内嵌 codex-cli 0.153.4 经 vendor AppServerClient 完成 initialize/model/list/config/read 全链路；`config/read` 返回本机真实配置（gpt-5.6-luna + xhigh + danger-full-access），证实认证共享。九个 adapter 方法（thread/start、thread/resume、turn/start、turn/steer、turn/interrupt、thread/list、thread/read、model/list、config/read）在 0.153.4 官方导出 schema 中全部存在且参数形状匹配。**发现的兼容性问题**：vendor 默认启动参数 `-c mcp_servers.codex-supervisor.enabled=false` 在 0.153.4 下导致 app-server 直接退出（"invalid transport"），我们接入时必须总是显式设置 `CODEX_APP_SERVER_ARGS`（至少 `["app-server"]`），不能依赖 vendor 默认值。冒烟脚本暂存 /tmp/cas-smoke.mjs，待固化为仓库 scripts/。
 13. ZCode Hook 协议已查证（2026-09-11，harness 内嵌 subagent 逆向取证 + 主 Agent 抽查验证，全文 docs/research/2026-09-11-zcode-hook-protocol.md）：恰好 7 个事件（无 SubagentStop/SessionEnd）；stdout 必须以 `{` 开头的严格 JSON（`additionalContext`/`hookSpecificOutput`），纯文本被忽略；无 ACK，exit 0 即完成；Hook env 注入 `ZCODE_SESSION_ID`（session 隔离的关键字段已确认存在）；additionalContext 仅当前 turn 可见，Stop 事件可配 `decision:"block"` 续轮（最多 3 次）。**发现当前实现三处硬伤**：plugins/zcode/plugin.json 用了不存在的 `mcpConfig`/`hooksConfig` 字段；hooks.json 用了非法事件 `after_turn`；zcode.mjs 输出纯文本会被忽略。MCP server 是否注入 session env 未确认。待办：修正插件三处 + dump-stdin 临时插件做运行态实证。
+14. 真实插件路径实测与 4 处缺陷修复（2026-09-11，记录 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md）。安装方式：仓库根 `marketplace.json` 声明本地 directory marketplace，ZCode 以标准插件机制装入并启用；缓存插件对本机做了本地化 patch（`node` + 仓库绝对路径 + `CODEX_BIN`/`CODEX_APP_SERVER_ARGS` env），已实测 GUI 重启后 patch 保留（重启只读缓存、不从源目录重同步）。实测暴露的 4 处缺陷（fake-adapter 回归全部漏检）：
+    - **① Hook 参数解析（最严重，直接使回流失效）**：插件传 `--host=zcode`，但旧 `option()` 只认 `--host zcode`，host 静默回退 `plain`，ZCode 收到纯文本被忽略。已抽 `src/shared/argv.mjs` 统一支持 `--k=v` 与 `--k v` 两种形式，并修 `drain.mjs` 覆盖用户显式 host 的问题。
+    - **② `--data-dir` 未透传**：bootstrap spawn serve 时漏传，导致 SQLite 落默认目录、与 socket/lock 分叉。已在 `stdio-bootstrap`/`startup-lock`/`mcp` 全链路透传；未显式给定时按 socket 所在目录推导。
+    - **③ idle shutdown 不生效**：execution 在异步 terminal 事件里被移除后，没有任何请求边界再触发 idle 判定。已给 RuntimeManager 加 `subscribeStateChanges`，terminal/spawn/send 时主动通知 RuntimeServer 重算 idle；Server listen 后先 arm 一次。
+    - **④ server 无法真正退出（孤儿进程）**：旧 shutdown 只关 SQLite，未终止 app-server 子进程，其 stdio 句柄拖住事件循环，`SIGTERM` 打不掉（已在真机复现：旧进程 SIGTERM 后仍存活并挂着活 app-server）。已给 adapter 加 `close()` 并纳入 `SUPERVISOR_ADAPTER_METHODS` 契约（fake 缺省为 no-op），RuntimeManager.close 变 async 并 await 之，Server 经 `onClosed` 统一收口 store。新增 `src/shared/server-log.mjs`，serve 生命周期日志写 `<data-dir>/server.log`（诊断可观测性缺口）。验证：真实 turn spawn 后 SIGKILL 宿主，completion 落盘（completed/pending）且 Server 随后 idle 自动退出；`hook --host=zcode` 输出严格 JSON `{"additionalContext":...}` 且 completion 转 delivered。回归 90/90。
 
 ## 执行边界
 

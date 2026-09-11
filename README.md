@@ -81,9 +81,9 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 
 ## Hook 与 ZCode 插件
 
-`codex-as-subagent hook --host=<host>` 从当前 canonical workspace 的 SQLite completion buffer 原子 claim pending completion，渲染后 ACK；`codex-as-subagent drain` 提供宿主无关的 plain 输出。Hook 不启动、恢复或中断 Codex thread。
+`codex-as-subagent hook --host=<host>` 从当前 canonical workspace 的 SQLite completion buffer 原子 claim pending completion，渲染后 ACK；`codex-as-subagent drain` 提供宿主无关的 plain 输出。Hook 不启动、恢复或中断 Codex thread。`--host` 同时接受 `--host=zcode` 与 `--host zcode` 两种写法。
 
-当前提供 `plugins/zcode/` 注册骨架：`.mcp.json` 注册 `codex-as-subagent mcp`，`hooks/hooks.json` 注册 `codex-as-subagent hook --host=zcode`，安装说明见 [plugins/zcode/README.md](plugins/zcode/README.md)。
+`plugins/zcode/` 注册 ZCode 插件：`.mcp.json` 提供十个 MCP 工具，`hooks/hooks.json` 在 `UserPromptSubmit` 与 `Stop` 两个事件触发 `codex-as-subagent hook --host=zcode`；安装说明见 [plugins/zcode/README.md](plugins/zcode/README.md)。该插件已按标准 marketplace 方式装入本机 ZCode 并完成真实路径验证，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。
 
 ## 开发测试闭环
 
@@ -103,6 +103,7 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 | docs/Codex As Subagent — 详细设计与编码规格.md | V1 权威设计与编码规格 |
 | docs/superpowers/plans/2026-09-11-codex-as-subagent-v1.md | 本轮实现计划、接口和测试任务 |
 | docs/autonomous-runs/ | 用户级验收快照与结果 |
+| docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md | ZCode 插件真实路径验收：4 处缺陷修复与 Hook 回流打通（2026-09-11） |
 | docs/research/2026-09-11-codex-runtime-discovery.md | Codex 安装形态、认证共享与 app-server 协议外部调研（2026-09-11） |
 | docs/research/2026-09-11-zcode-hook-protocol.md | ZCode Hook/MCP/插件协议逆向取证调研（2026-09-11） |
 | plugins/zcode/README.md | ZCode MCP/Hook 插件安装说明 |

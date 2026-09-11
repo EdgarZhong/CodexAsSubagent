@@ -145,19 +145,47 @@ export class RuntimeManager {
     this.deliveryIds = new WeakMap();
     this.locks = new Map();
     this.closed = false;
+    this.stateChangeListeners = new Set();
     this.unsubscribe = typeof adapter.subscribeRuntimeEvents === 'function'
       ? adapter.subscribeRuntimeEvents((event) => this.#onRuntimeEvent(event))
       : null;
   }
 
-  close() {
+  // Runtime Server 用它重算 idle：execution 在异步 terminal 事件里被移除后，
+  // 没有任何请求边界会再触发 idle 判定，必须由状态变更主动通知。
+  subscribeStateChanges(listener) {
+    if (typeof listener !== 'function') throw new TypeError('subscribeStateChanges requires a listener.');
+    this.stateChangeListeners.add(listener);
+    return () => this.stateChangeListeners.delete(listener);
+  }
+
+  #emitStateChange() {
+    for (const listener of [...this.stateChangeListeners]) {
+      try {
+        listener();
+      } catch {
+        // 空闲判定失败不得影响运行时主流程。
+      }
+    }
+  }
+
+  async close() {
     if (this.closed) return;
     this.closed = true;
     if (typeof this.unsubscribe === 'function') this.unsubscribe();
+    this.stateChangeListeners.clear();
     for (const waiters of this.waiters.values()) {
       for (const waiter of waiters) clearTimeout(waiter.timer);
     }
     this.waiters.clear();
+    // 终止 supervisor 子进程，避免其 stdio 句柄持有事件循环导致进程无法退出。
+    if (typeof this.adapter?.close === 'function') {
+      try {
+        await this.adapter.close();
+      } catch {
+        // 关闭必须尽力而为，不能因 supervisor 停止失败而阻塞 Server 退出。
+      }
+    }
   }
 
   async #workspace(ctx) {
@@ -305,6 +333,7 @@ export class RuntimeManager {
       } catch {
         // A malformed or unverifiable terminal event must not tear down the runtime.
       }
+      this.#emitStateChange();
       return;
     }
     if (type === 'thread.status.changed' && typeof event.status === 'string') {
@@ -368,6 +397,7 @@ export class RuntimeManager {
     state.status = 'running';
     state.startedAt = startedAt;
     state.lastActivityAt = startedAt;
+    this.#emitStateChange();
     return {
       threadId,
       status: 'running',
@@ -430,6 +460,7 @@ export class RuntimeManager {
       state.status = 'running';
       state.startedAt = startedAt;
       state.lastActivityAt = startedAt;
+      this.#emitStateChange();
       return {
         threadId: target.threadId,
         status: 'running',

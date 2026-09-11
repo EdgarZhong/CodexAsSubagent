@@ -1,0 +1,17 @@
+{
+  "name": "codex-as-subagent-local",
+  "description": "Local development marketplace for Codex As Subagent.",
+  "owner": {
+    "name": "EdgarZhong"
+  },
+  "plugins": [
+    {
+      "name": "codex-as-subagent",
+      "version": "0.1.0",
+      "description": "将本机 Codex subagent runtime 注册到 ZCode，并回流异步 completion。",
+      "category": "developer-tools",
+      "tags": ["codex", "subagent", "mcp", "hooks"],
+      "source": "plugins/zcode"
+    }
+  ]
+}

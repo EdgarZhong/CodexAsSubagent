@@ -109,6 +109,7 @@ export async function acquireStartupLock(lockPath, {
 export async function ensureServer({
   socketPath,
   lockPath,
+  dataDir = null,
   startServer,
   timeoutMs = 5_000,
   probe = probeSocket,
@@ -121,7 +122,7 @@ export async function ensureServer({
   const lock = await acquireStartupLock(lockPath, { socketPath, probe, ...lockOptions });
   if (lock.acquired) {
     try {
-      await startServer({ socketPath, lockPath, instanceId: lock.record.instanceId });
+      await startServer({ socketPath, lockPath, dataDir, instanceId: lock.record.instanceId });
     } finally {
       await lock.release();
     }

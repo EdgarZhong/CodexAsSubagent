@@ -12,17 +12,16 @@ import { WorkspaceGuard } from '../core/workspace-guard.mjs';
 import { createHistoryAdapter } from '../adapters/supervisor/history-adapter.mjs';
 import { createRuntimeServer } from '../server/server.mjs';
 import { recoverState } from '../server/recovery.mjs';
-
-function option(argv, name, fallback) {
-  const index = argv.indexOf(name);
-  return index >= 0 && argv[index + 1] ? argv[index + 1] : fallback;
-}
+import { createServerLogger } from '../shared/server-log.mjs';
+import { option } from '../shared/argv.mjs';
 
 export async function serve(argv = []) {
   const dataDir = option(argv, '--data-dir', DEFAULT_DATA_DIR);
   const socketPath = option(argv, '--socket', join(dataDir, 'server.sock'));
   const lockPath = option(argv, '--lock', join(dataDir, 'server.lock'));
   const idleShutdownMs = Number(option(argv, '--idle-shutdown-ms', '3000'));
+  const logger = createServerLogger({ dataDir });
+  logger.info('serve.start', { dataDir, socketPath, lockPath, idleShutdownMs });
   const store = openSqliteStore(dataDir);
   const adapter = createSupervisorAdapter();
   const executions = createExecutionStore(store);
@@ -40,14 +39,27 @@ export async function serve(argv = []) {
     ownerInstanceId: randomUUID(),
   });
   await recoverState({ executionStore: executions, historyAdapter: history, completionRouter: router });
-  const server = createRuntimeServer({ runtime, socketPath, idleShutdownMs });
+  let storeClosed = false;
+  const server = createRuntimeServer({
+    runtime,
+    socketPath,
+    idleShutdownMs,
+    onShutdown: (reason) => logger.info('serve.shutdown', { reason }),
+    onClosed: () => {
+      if (storeClosed) return;
+      storeClosed = true;
+      store.close();
+      logger.info('serve.closed', { socketPath });
+    },
+  });
   await server.listen(socketPath);
-  const shutdown = async () => {
+  logger.info('serve.listening', { socketPath });
+  const shutdown = async (signal) => {
+    logger.info('serve.signal', { signal });
     await server.close();
-    store.close();
   };
-  process.once('SIGTERM', shutdown);
-  process.once('SIGINT', shutdown);
+  process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.once('SIGINT', () => { void shutdown('SIGINT'); });
   void lockPath;
-  return { server, runtime, store, socketPath, lockPath, shutdown };
+  return { server, runtime, store, socketPath, lockPath, shutdown, logger };
 }

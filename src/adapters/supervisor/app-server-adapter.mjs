@@ -16,6 +16,7 @@ export const SUPERVISOR_ADAPTER_METHODS = Object.freeze([
   'listModels',
   'readEffectiveConfig',
   'subscribeRuntimeEvents',
+  'close',
 ]);
 
 function compact(value) {
@@ -93,7 +94,11 @@ export function createFakeSupervisorAdapter(implementation = {}) {
   };
   const adapter = {};
   for (const method of SUPERVISOR_ADAPTER_METHODS) {
-    adapter[method] = implementation[method] ?? unsupported(method);
+    // close 是资源回收钩子，缺省必须是安全的 no-op，否则测试里的 fake adapter
+    // 会在 runtime.close() 时抛出无关错误。
+    adapter[method] = method === 'close'
+      ? (implementation[method] ?? (async () => {}))
+      : (implementation[method] ?? unsupported(method));
   }
   return assertSupervisorAdapter(adapter);
 }
@@ -229,6 +234,12 @@ export function createSupervisorAdapter(options = {}) {
       assertFunction(listener, 'runtime event listener');
       runtimeEvents.on('event', listener);
       return () => runtimeEvents.off('event', listener);
+    },
+
+    // 关闭 Runtime 时必须真正终止 app-server 子进程：否则子进程的 stdio 句柄会
+    // 让 Node 事件循环无法自然退出，Runtime Server 会变成无法回收的孤儿进程。
+    async close() {
+      if (typeof client.stop === 'function') await client.stop();
     },
   };
 

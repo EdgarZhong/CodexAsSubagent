@@ -1,6 +1,7 @@
 import net from 'node:net';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
+import { dirname } from 'node:path';
 
 import { ensureServer } from '../server/startup-lock.mjs';
 import { errorCode } from '../shared/errors.mjs';
@@ -13,12 +14,23 @@ function nextId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function defaultStartServer({ socketPath, lockPath }) {
+export function defaultStartServer({ socketPath, lockPath, dataDir }) {
   const cli = process.env.CODEX_AS_SUBAGENT_CLI ?? process.argv[1];
   if (typeof cli !== 'string' || cli.length === 0) {
     throw new Error('Cannot lazily start Runtime Server without a CLI entrypoint.');
   }
-  const child = spawn(process.execPath, [cli, 'serve', '--socket', socketPath, '--lock', lockPath], {
+  // serve 需要 --data-dir 才能把 SQLite 落在与 socket/lock 相同的目录；
+  // 只传 socket/lock 时 serve 会退回默认 data dir，导致两处状态分叉。
+  const resolvedDataDir = typeof dataDir === 'string' && dataDir.length > 0
+    ? dataDir
+    : dirname(socketPath);
+  const child = spawn(process.execPath, [
+    cli,
+    'serve',
+    '--socket', socketPath,
+    '--lock', lockPath,
+    '--data-dir', resolvedDataDir,
+  ], {
     detached: true,
     stdio: 'ignore',
     env: process.env,
@@ -62,6 +74,7 @@ export class StdioBootstrap {
   constructor({
     socketPath,
     lockPath,
+    dataDir = null,
     cwd = process.cwd(),
     workspaceGuard,
     stdin = process.stdin,
@@ -73,6 +86,7 @@ export class StdioBootstrap {
     if (typeof socketPath !== 'string' || socketPath.length === 0) throw new TypeError('StdioBootstrap requires socketPath.');
     this.socketPath = socketPath;
     this.lockPath = lockPath;
+    this.dataDir = dataDir;
     this.cwd = cwd;
     this.workspaceGuard = workspaceGuard;
     this.stdin = stdin;
@@ -111,6 +125,7 @@ export class StdioBootstrap {
     await this.ensure({
       socketPath: this.socketPath,
       lockPath: this.lockPath,
+      dataDir: this.dataDir,
       startServer: this.startServer,
     });
     return await this.#socketRequest({ ...request, context });

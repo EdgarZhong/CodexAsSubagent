@@ -22,6 +22,8 @@ export class RuntimeServer {
     socketPath = null,
     instanceId = randomUUID(),
     idleShutdownMs = 3_000,
+    onShutdown = null,
+    onClosed = null,
   } = {}) {
     if (!runtime) throw new TypeError('RuntimeServer requires a RuntimeManager.');
     this.runtime = runtime;
@@ -31,12 +33,22 @@ export class RuntimeServer {
     this.server = null;
     this.connections = new Set();
     this.closed = false;
+    this.onShutdown = onShutdown;
+    this.onClosed = onClosed;
     this.lifecycle = lifecycle ?? new LifecycleManager({
       idleShutdownMs,
       getActiveExecutionCount: () => activeCount(this.runtime),
       getUnackedDirectCount: () => unackedCount(this.runtime),
-      onShutdown: async () => this.close(),
+      onShutdown: async () => {
+        if (typeof this.onShutdown === 'function') this.onShutdown('idle');
+        await this.close();
+      },
     });
+    // 异步 terminal 事件会把 execution 从 SQLite 移除，但没有任何请求边界再触发
+    // idle 判定；订阅运行时状态变更，才能让 idle shutdown 及时生效。
+    this.unsubscribeStateChanges = typeof this.runtime.subscribeStateChanges === 'function'
+      ? this.runtime.subscribeStateChanges(() => this.lifecycle.noteStateChange())
+      : null;
   }
 
   async listen(socketPath = this.socketPath) {
@@ -61,6 +73,9 @@ export class RuntimeServer {
       this.server.once('listening', onListening);
       this.server.listen(socketPath);
     });
+    // Server 可能被 lazy 拉起却始终没有请求；先 armed 一次 idle 计时，
+    // 保证空转的服务也能自行退出而不是永久驻留。
+    this.lifecycle.noteStateChange();
     return this;
   }
 
@@ -111,6 +126,8 @@ export class RuntimeServer {
     if (this.closed) return;
     this.closed = true;
     this.lifecycle.close();
+    if (typeof this.unsubscribeStateChanges === 'function') this.unsubscribeStateChanges();
+    this.unsubscribeStateChanges = null;
     for (const socket of this.connections) socket.destroy();
     this.connections.clear();
     if (this.server) {
@@ -118,7 +135,10 @@ export class RuntimeServer {
       this.server = null;
     }
     if (this.socketPath) await unlink(this.socketPath).catch(() => {});
-    this.runtime.close?.();
+    // runtime.close 会一并终止 supervisor 子进程；必须 await，否则孤儿 app-server
+    // 会拖住事件循环让 Server 进程无法退出。
+    await this.runtime.close?.();
+    if (typeof this.onClosed === 'function') this.onClosed();
   }
 }
 
