@@ -22,7 +22,7 @@ test('ZCode plugin registers MCP and Hook without copying runtime logic', async 
   assert.equal(server.type, 'stdio');
   assert.equal(server.command, 'codex-as-subagent');
   assert.deepEqual(server.args, ['mcp']);
-  for (const event of ['UserPromptSubmit', 'Stop']) {
+  for (const event of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
     const entries = hooks.hooks[event];
     assert.ok(Array.isArray(entries) && entries.length === 1, `hooks.hooks.${event} must exist`);
     const entry = entries[0].hooks[0];
@@ -31,4 +31,6 @@ test('ZCode plugin registers MCP and Hook without copying runtime logic', async 
     assert.deepEqual(entry.args, ['hook', '--host=zcode']);
     assert.equal(typeof entry.timeoutMs, 'number');
   }
+  // 工具事件必须匹配所有工具：省略 matcher 即全匹配（ZCode 官方语义）。
+  assert.equal('matcher' in hooks.hooks.PostToolUse[0], false, 'PostToolUse 应省略 matcher 以匹配所有工具');
 });

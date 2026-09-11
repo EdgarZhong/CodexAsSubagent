@@ -13,6 +13,18 @@
         ]
       }
     ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "process",
+            "command": "codex-as-subagent",
+            "args": ["hook", "--host=zcode"],
+            "timeoutMs": 30000
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

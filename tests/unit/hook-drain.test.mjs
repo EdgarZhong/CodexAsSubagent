@@ -102,6 +102,18 @@ test('zcode wrapper emits strict JSON and requests continuation only on Stop', (
   assert.match(stop.additionalContext, /json-completion/);
 });
 
+test('zcode wrapper never emits decision on tool/lifecycle events other than Stop', () => {
+  const completions = [row('tool-completion')];
+  // PostToolUse/PostToolUseFailure 的 hookSpecificOutput schema 不接受 decision/continue，
+  // 误加会让整条输出作废并被记 hook failed。
+  for (const event of ['PostToolUse', 'PostToolUseFailure', 'UserPromptSubmit', 'PreToolUse']) {
+    const parsed = JSON.parse(renderCompletions(completions, 'zcode', { event }));
+    assert.match(parsed.additionalContext, /tool-completion/);
+    assert.equal(parsed.decision, undefined, `${event} 不得输出 decision`);
+    assert.equal(parsed.reason, undefined, `${event} 不得输出 reason`);
+  }
+});
+
 test('drainPending can write through a backpressure-aware stream', async () => {
   const output = new PassThrough();
   const chunks = [];

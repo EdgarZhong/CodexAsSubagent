@@ -45,6 +45,12 @@
     - **③ idle shutdown 不生效**：execution 在异步 terminal 事件里被移除后，没有任何请求边界再触发 idle 判定。已给 RuntimeManager 加 `subscribeStateChanges`，terminal/spawn/send 时主动通知 RuntimeServer 重算 idle；Server listen 后先 arm 一次。
     - **④ server 无法真正退出（孤儿进程）**：旧 shutdown 只关 SQLite，未终止 app-server 子进程，其 stdio 句柄拖住事件循环，`SIGTERM` 打不掉（已在真机复现：旧进程 SIGTERM 后仍存活并挂着活 app-server）。已给 adapter 加 `close()` 并纳入 `SUPERVISOR_ADAPTER_METHODS` 契约（fake 缺省为 no-op），RuntimeManager.close 变 async 并 await 之，Server 经 `onClosed` 统一收口 store。新增 `src/shared/server-log.mjs`，serve 生命周期日志写 `<data-dir>/server.log`（诊断可观测性缺口）。验证：真实 turn spawn 后 SIGKILL 宿主，completion 落盘（completed/pending）且 Server 随后 idle 自动退出；`hook --host=zcode` 输出严格 JSON `{"additionalContext":...}` 且 completion 转 delivered。回归 90/90。
     - **生产路径全链路实证（2026-09-11 追加）**：默认数据目录 `~/.codex-as-subagent` 下冷启动干净 MCP 进程，`tools/list` 十工具齐全，真实 gpt-5.6-luna 子 agent spawn；**本 ZCode 会话自身的 Stop hook 自动执行了 `hook --host=zcode`**，将一条 pending completion 作为 additionalContext 注入并带 `decision:block` 续轮，completion 转 delivered——`spawn 异步 → 落盘 → Stop hook 自动回流 → 续轮`完整用户路径经 Host 真实驱动打通，非脚本模拟。
+15. 回流事件选择定稿（2026-09-11，用户质疑后重新论证，推翻照搬调研建议）：插件挂 `UserPromptSubmit` + `PostToolUse` + `Stop` 三个事件。
+    - `PostToolUse`（省略 matcher = 匹配所有工具，ZCode 官方语义）：turn 进行中即时回流，是"子 agent 完成就尽快通知主会话"的唯一途径；实测无 pending 时空查询仅 20–30ms，此前"每次工具调用加固定税"的顾虑被推翻。工具事件的 additionalContext 拼接到工具结果尾部，且**不接受 decision/continue**（误加会作废并记 hook failed），wrapper 已保证仅 Stop 输出 decision。
+    - `UserPromptSubmit`：跨 turn 兜底。
+    - `Stop`：仅覆盖"最后一次工具调用之后、turn 结束之前"落地的窄窗口，以 `decision:block` 续轮送达。**不添加 `stop_hook_active` 护栏**：claim→ack 会在 block 的同一瞬间清除 pending，产生 block 的前提自动消失，构造上无法套娃；naive 加护栏反而会掐掉合法投递。机制澄清：hook 从不等待子 agent（那是 `codex_wait` 的职责），也不阻塞 turn。
+    - 不再新增 Hook 事件的理由：`PreToolUse`/`PermissionRequest`/`PostToolUseFailure` 无回流语义；`SessionStart` 时机过早。会话 idle 期间子 agent 完成只能等下次 `UserPromptSubmit`，这是 Host 事件驱动的硬限制，与 ZCode 内置 mailbox 一致，配套解法是用户挂 Goal 保持主会话存活 + 模型用 `codex_wait`。
+    - 双通道无重复消费：`claimPendingHook` 只取 `delivery_state='pending'`，`codex_wait` 走 direct 投递置为 `claimed_direct→delivered`，两条路径互斥。
 
 ## 执行边界
 
