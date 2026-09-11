@@ -1614,26 +1614,49 @@ interrupt 拒绝
 
 即使模型偶然知道另一个 threadId，也不能跨 workspace 使用。
 
+### 同 workspace 多主会话：V1 局限与 V2 方向
+
+V1 的隔离边界只到 workspace，没有 session 维度：
+
+- `executions` / `completions` 的归属字段只有 `workspace`，没有 `owner_session_id`。
+- Hook 按 workspace 领取 pending completion：同一目录下任意主会话触发的 Hook 会领走该目录下所有会话的 completion。
+- `codex_list_threads` 对同 workspace 的所有 thread 可见，`send` / `steer` / `interrupt` 无会话归属保护。
+
+**V1 使用前提（用户 2026-09-11 拍板）**：同一 workspace 同时只运行一个启用本插件的 Host 主会话；并行分工由 subagent 之间的并行承担。这不视为致命设计缺陷，而是本协作形态的目标用法。
+
+**V2 改进方向**：session 身份不由模型提供，而由每个 Host 会话各自拉起的 stdio Bootstrap 进程持有——启动时从 Host 注入的环境变量（如 `ZCODE_SESSION_ID`）读取，缺失则自生成随机 ID，随请求作为隐藏 context 传给 Server。数据模型上 `executions` / `completions` 增加 `owner_session_id`，spawn 时写入；Hook 携带同一会话身份，只 claim 本 session 的 completion；`list_threads` 默认只列本 session，或全列但标注 `occupied_by_other_session` 且跨会话控制操作 fail-closed。
+
+**V2 落地前需拍板的三件事**：
+
+1. 孤儿 completion：属主 session 崩溃后再无 Hook 领取，是加 lease/TTL 后降级为 workspace 级可见，还是永久锁定。
+2. 跨 session `read_thread`：只读放行（利于调试）还是完全不可见（隔离更干净）。
+3. `list_threads` 对其他 session 的 thread：隐藏还是标注占用。
+
 ---
 
 ## 6.3 Dedicated Codex Profile
 
 Codex As Subagent 使用专门的 Codex Profile。
 
-例如：
+增量覆写内容来自本项目持久目录下、与 Codex 配置同名的：
 
 ```text
-~/.codex/codex-as-subagent.config.toml
+~/.codex-as-subagent/config.toml
 ```
 
-默认：
+**该文件是可选的**：
+
+- 不存在：不注入任何覆写，app-server 直接使用其 `$CODEX_HOME` 下用户常规的 `~/.codex/config.toml`。
+- 存在：Server 启动 app-server 时把其中的键翻译为 `-c key=value` 启动参数注入（经 vendor `CODEX_APP_SERVER_ARGS` 传递），不修改用户 `~/.codex/config.toml`。
+
+推荐使用该文件解耦"日常使用 Codex"与"Codex As Subagent 使用 Codex"两份配置，例如：
 
 ```toml
 model = "gpt-5.6-luna"
 model_reasoning_effort = "xhigh"
 ```
 
-Server 使用该 profile 启动 app-server。
+Codex 原生 `-p <name>` profile 机制（叠加 `$CODEX_HOME/<name>.config.toml`）**不采用**：调研证实其在 app-server 路径下不可靠（`thread/start` 可能忽略 profile 字段，见 docs/research/2026-09-11-codex-runtime-discovery.md 第 5 节）。覆写只走 `-c key=value`。
 
 这样用户平常在 Codex App 中临时改变默认 model/effort，不影响 Subagent 默认。
 
@@ -1651,20 +1674,16 @@ global capabilities
 
 ---
 
-## 6.4 自身配置
+## 6.4 配置分层：Codex 覆写 vs Server 自身
 
-```text
-~/.codex-as-subagent/config.toml
-```
+两层配置必须分开，不得混写（用户 2026-09-11 拍板）：
 
-V1 只需要类似：
+**第一层：`~/.codex-as-subagent/config.toml` 是对 Codex 配置的增量覆写**（用法见 6.3）。只放 Codex 认识的键（如 `model`、`model_reasoning_effort`），不配置 Server 自身行为。
 
-```toml
-codex_profile = "codex-as-subagent"
-idle_shutdown_ms = 3000
-```
+**第二层：Server 自身运行参数不进入该文件**：
 
-以下内容不要变成用户配置：
+- Codex 二进制路径：不写入任何 config.toml。走 `CODEX_BIN` 环境变量；缺省时由 Server 启动时的自动发现解析为绝对路径（GUI Host 拉起的进程 PATH 不可信，不得只依赖 PATH 查找）。
+- 其余 Server 参数属于协议和实现常量，不暴露为用户配置：
 
 ```text
 wait = 500s
@@ -1673,9 +1692,38 @@ status preview cap
 files cap
 DB filename
 socket filename
+idle shutdown
 ```
 
-它们属于协议和实现常量。
+### Codex Runtime 自动发现与协议探测
+
+发现目标不是"机器上有没有叫 codex 的文件"，而是"哪些 Codex runtime 满足本项目所需的 stable app-server contract"（依据：docs/research/2026-09-11-codex-runtime-discovery.md）。
+
+解析顺序（候选 realpath 去重后逐个探测，选中即止）：
+
+```text
+0. CODEX_BIN 环境变量（显式覆盖，仍需通过探测）
+1. PATH 中的 codex（尊重用户主动安装；GUI Host 环境可能无用户 PATH）
+2. standalone managed：~/.codex/packages/standalone/current/bin/codex
+3. standalone 入口：~/.local/bin/codex
+4. Homebrew：/opt/homebrew/bin/codex（Apple Silicon）、/usr/local/bin/codex（Intel）
+5. /Applications/ChatGPT.app/Contents/Resources/codex（随 App 自动更新、常为 alpha，降级 fallback）
+6. /Applications/Codex.app/Contents/Resources/codex（legacy fallback）
+```
+
+不扫描 IDE extension 私有 runtime（无稳定路径与 ABI）。不按版本号大小排序（alpha 版本号可能高于 stable）。
+
+每个候选的协议探测：
+
+```text
+1. codex --version
+2. codex app-server generate-json-schema --out <tmp>（stable surface），检查必需 method/type
+3. 拉起 ephemeral app-server 子进程，完成 initialize/initialized 冒烟后终止
+```
+
+选中后记录 `{binary 绝对路径, version, schema hash}`；Server 单次生命周期内绝不切换 binary；每次冷启动重新执行发现与探测（App 自动更新可能在同一路径下替换实现）。全部候选失败时 fail-closed，`doctor` 输出各候选诊断，并建议官方 standalone 安装（`curl -fsSL https://chatgpt.com/codex/install.sh | sh`，支持 `--release X.Y.Z` pin）。
+
+第三方永远自起 `codex app-server` 子进程，不 attach Desktop 或 managed daemon 的已有实例（daemon 官方仍标记 experimental；一个 active thread 只能有一个 runtime owner）。
 
 ---
 

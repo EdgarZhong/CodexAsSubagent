@@ -59,7 +59,7 @@ Bootstrap 只负责取得当前 workspace、lazy-start Server、转发请求和 
 ## 运行环境与命令
 
 - Node.js >=24.0.0，使用 ESM。
-- 持久目录默认为 ~/.codex-as-subagent/，包含 config.toml、state.sqlite、Unix socket、锁和日志。
+- 持久目录默认为 ~/.codex-as-subagent/，包含 config.toml（可选，对 Codex 配置的增量覆写，只含 Codex 键，见详细设计 6.3/6.4）、state.sqlite、Unix socket、锁和日志。
 - Codex 自有认证、profile、transcript 仍位于 ~/.codex/，不复制到本项目数据库。
 - 默认 dedicated Codex profile：gpt-5.6-luna + xhigh。
 
@@ -70,6 +70,8 @@ Bootstrap 只负责取得当前 workspace、lazy-start Server、转发请求和 
     node src/cli/main.mjs --help
 
 运行前需要本机已登录 Codex，并具备可用的 Codex app-server。没有 Hook 能力的 Host 仍可使用 wait、wait_many、status 和 read_thread。
+
+使用前提：V1 的隔离边界是 workspace，同一 workspace 同时只运行一个启用本插件的 Host 主会话；并行分工由 subagent 承担。session 级隔离为 V2 方向，详见详细设计 6.2 节末尾。
 
 ## MCP 公共工具
 
@@ -101,6 +103,8 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 | docs/Codex As Subagent — 详细设计与编码规格.md | V1 权威设计与编码规格 |
 | docs/superpowers/plans/2026-09-11-codex-as-subagent-v1.md | 本轮实现计划、接口和测试任务 |
 | docs/autonomous-runs/ | 用户级验收快照与结果 |
+| docs/research/2026-09-11-codex-runtime-discovery.md | Codex 安装形态、认证共享与 app-server 协议外部调研（2026-09-11） |
+| docs/research/2026-09-11-zcode-hook-protocol.md | ZCode Hook/MCP/插件协议逆向取证调研（2026-09-11） |
 | plugins/zcode/README.md | ZCode MCP/Hook 插件安装说明 |
 
 ## 许可证
