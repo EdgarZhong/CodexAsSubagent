@@ -26,6 +26,7 @@
 - [x] 实现 Server 冷启动 Codex runtime 自动发现（设计 6.4）。
 - [x] 十工具真实 ZCode 会话 E2E；发现并修复第 5 处缺陷（turn 终止通知复用导致 interrupted/failed 不落 terminal）；PostToolUse 中途回流实证。
 - [x] 跨客户端线程锁错误规范化为 `thread_locked`（只规范化此一已知原因，其余上游错误原样透传）。
+- [x] 创建 GitHub 私有远端仓库 EdgarZhong/CodexAsSubagent（origin，默认分支 main），`codex/autonomous-v1` 全量 47 提交以 fast-forward 合并至 main 并推送（2026-09-11，用户授权；远端暂只有 main 分支）。
 
 ### Backlog（V1 未完成项，按优先级）
 
