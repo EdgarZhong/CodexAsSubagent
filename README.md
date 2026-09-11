@@ -76,7 +76,7 @@ Bootstrap 只负责取得当前 workspace、lazy-start Server、转发请求和 
 
 使用前提：V1 的隔离边界是 workspace，同一 workspace 同时只运行一个启用本插件的 Host 主会话；并行分工由 subagent 承担。session 级隔离为 V2 方向，详见详细设计 6.2 节末尾。
 
-**已知缺陷（2026-09-11 实测）**：V1 隔离不完整，缺 **host** 与 **session** 两层，已在 Kimi Web 复现 completion 串线——同一 workspace 下 A 会话的 completion 被投递进 B 会话（旧 session），并观察到跨 Host 抢占（所有 Host 共享同一 SQLite 与单实例 Runtime Server）。根因、取证与三层隔离意图见 docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md；方案待定稿。
+**已知缺陷（2026-09-11 实测）**：V1 隔离不完整，缺 **host** 与 **session** 两层，已在 Kimi Web 与 **ZCode** 分别复现 completion 串线——同一 workspace 下 A 会话的 completion 被投递进 B 会话（Kimi 侧为旧 session；ZCode 侧为两个并发真实会话，A 存活期间仍丢投）。另观察到跨 Host 抢占（所有 Host 共享同一 SQLite 与单实例 Runtime Server）。根因、取证与三层隔离意图见 docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md；方案待定稿。
 
 ## MCP 公共工具
 
@@ -140,7 +140,7 @@ Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP�
 | docs/Codex As Subagent — 详细设计与编码规格.md | V1 权威设计与编码规格 |
 | docs/superpowers/plans/2026-09-11-codex-as-subagent-v1.md | 本轮实现计划、接口和测试任务 |
 | docs/autonomous-runs/ | 用户级验收快照与结果 |
-| docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md | Completion 回流串线排查（host/workspace/session 三层隔离缺失）、清理前系统快照与下一步意图（2026-09-11） |
+| docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md | Completion 回流串线排查（Kimi Web + ZCode 均已复现，host/workspace/session 三层隔离缺失）、清理前系统快照与下一步意图（2026-09-11） |
 | docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md | 十工具真实 ZCode 会话 E2E、PostToolUse 中途回流与中断协议修复（2026-09-11） |
 | docs/autonomous-runs/20260911-1701-kimi-code-integration.md | Kimi Code TUI/Web 插件、安装器与 completion 回流验收 |
 | docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md | ZCode 插件真实路径验收：4 处缺陷修复与 Hook 回流打通（2026-09-11） |

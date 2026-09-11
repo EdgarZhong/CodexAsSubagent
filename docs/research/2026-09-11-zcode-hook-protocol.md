@@ -46,7 +46,11 @@ JSON 对象 + 尾部换行；camelCase 原始字段 + snake_case Claude 兼容�
 - 配置文件 `mcp.servers`：stdio 型 `{type:"stdio",command,args,cwd,env,enabled,timeoutMs}`；schema 严格，未知键整个 server 被丢弃；配置文件不展开模板（用绝对路径）；支持 env 注入。
 - 插件：`<pluginRoot>/.mcp.json`（顶层 `mcpServers` 键）或 manifest `mcpServers` 字段；插件 server 支持模板展开；工具名按 `plugin:<pluginName>:<serverName>` 命名空间注册。
 - 生命周期：会话启动时自动连接；默认 **per-session 隔离**（每会话独立 stdio server 进程，会话结束回收）。
-- **MCP server 进程是否注入 `ZCODE_SESSION_ID`：未确认**（bundle 未见 MCP spawn 注入 session env）。
+- **MCP server 进程是否注入 `ZCODE_SESSION_ID`：已实证为「不注入」**（2026-09-11）。对 7 个运行中的
+  `node src/cli/main.mjs mcp` 进程逐个 `ps eww -p <pid>`，env 中只有 `ZCODE_APP_VERSION`、
+  `ZCODE_BASE_URL`、`ZCODE_PROJECT_DIR`、`ZCODE_PLUGIN_ROOT`/`ZCODE_PLUGIN_DATA`/`ZCODE_PLUGIN_ID`、
+  `ZCODE_PROCESS_LABEL`、各 tool binary 路径等，**均无 `ZCODE_SESSION_ID`**。故 session 身份只在 Hook
+  通道可得，与 §8.4 的判断一致。
 
 ## 7. 插件分发
 
@@ -60,10 +64,36 @@ JSON 对象 + 尾部换行；camelCase 原始字段 + snake_case Claude 兼容�
 1. `plugins/zcode/.zcode-plugin/plugin.json` 的 `mcpConfig`/`hooksConfig` 字段名不存在于 ZCode，插件不会被识别。改为标准位置自动探测，或用 `hooks`/`mcpServers` 字段。
 2. `plugins/zcode/hooks/hooks.json` schema 全错（`after_turn` 非合法事件）。应挂 `Stop` + `UserPromptSubmit`，`type:"process"`。
 3. `src/hook/hosts/zcode.mjs` 输出纯文本包装，会被 ZCode 忽略。必须输出严格 JSON（顶层 `additionalContext` 或 `hookSpecificOutput`）；无 completion 时不输出任何内容、exit 0。
-4. 会话隔离：Hook 侧用 `ZCODE_SESSION_ID` env；MCP 侧 session 注入未确认，V2 设计应以 hook 侧 session_id 为准、MCP 侧用 cwd 匹配。
+4. 会话隔离：Hook 侧用 `ZCODE_SESSION_ID` env；**MCP 侧已实证不注入 session**（见 §6），V2 设计应以 hook 侧 session_id 为准、MCP 侧用 cwd 匹配。
 5. 备选通道（逆向发现，无文档背书，仅作 fallback）：`~/.zcode/mailbox/<session_id>/unread/*.json` 信箱，信封 `{version:1, messageId, fromSessionId, toSessionId, content, createdAt}`，由内置 `builtin.sessionMailbox.drain` 在 UserPromptSubmit/PostToolUse/Stop 时注入；不触发 Stop 续轮，语义弱于自有 Stop hook。
 6. 诊断：hook 执行记录 `hook.run.*` 事件在 `~/.zcode/cli/log/zcode-*.jsonl` 与 Settings → Plugin Management。
 
-## 未实证声明
+## 9. 干净双会话 E2E 观测方法（2026-09-11 实证，可复用）
 
-基于 bundle 源码取证与官方 skill 文档，未在运行中的 ZCode 会话实际触发 hook；首次集成时建议用 dump-stdin 临时插件做一次运行态验证。
+要在不打扰桌面会话的前提下观测 Hook 回流与 session 路由，用 headless 进程造「第二个真实 ZCode 会话」：
+
+- **入口**：`node /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs --prompt "<文本>" --cwd <workspace>`。
+  该 build 不接受 `--json` / `--max-turns`（会报 Unknown option），只需要 `--prompt` + `--cwd`。
+- **凭证**：headless 的 model 取自 `~/.zcode/cli/config.json` 顶层 `model`（当前 `anthropic/k3-256k`）；
+  provider 凭证**必须走环境变量**（`ANTHROPIC_API_KEY` + `ANTHROPIC_BASE_URL`，Kimi provider 的 baseURL
+  要带 `/v1`），不从 `~/.zcode/v2/config.json` 读。它与桌面会话**共用同一套 `~/.zcode`、同一插件缓存、
+  同一 `~/.codex-as-subagent` 数据库**，因此**不需要也不应另建干净配置**。
+- **观察注入结果**：ZCode 把每轮实际发给模型的 body 落在 `~/.zcode/cli/rollout/model-io-sess_<sessionId>.jsonl`。
+  Hook 的 additionalContext 会出现在 `request.messages[].content`，形如
+  `<system-reminder>\nUserPromptSubmit hook additional context: …</system-reminder>`，据此可直接证明
+  「哪个 session 收到了哪条 completion」。
+- **关键陷阱**：**当前会话自己不能做实验发起方**——你每调一次工具就会触发自己的 PostToolUse Hook，
+  把 pending completion 抢回本会话，污染实验。发起 spawn 的一方必须是另一个进程；且若该方要证明
+  「存活期间仍丢投」，需在 spawn 后保持存活（例如接一个 `sleep`）再让第三方会话触发 Hook。
+- **规避跨 Host 干扰**：与 Kimi 常驻 worker 同 workspace 时，worker 会在约 1 秒内抢走 pending
+  completion。Kimi worker 的 `--workspace` 在启动时固定、不轮询其它路径，故**换一个全新的空 workspace
+  做实验即可天然隔离**，无需停止任何 worker。判定领取方看 `delivery_id` 前缀：`kimi-web-` 为 Kimi
+  worker，普通 UUID 为 ZCode/Kimi Hook 或 direct wait。
+
+## 10. 未实证声明
+
+基于 bundle 源码取证与官方 skill 文档。运行态实证已由 2026-09-11 的多轮真实会话完成：
+1250/1340 两轮验证了 Hook 回流与十工具路径；`UserPromptSubmit`/`PostToolUse`/`Stop` 三个事件的
+additionalContext 注入均已真机观察到（含 §9 的 headless 双会话法）。仍未实证的是 **`Stop` 的
+`decision:"block"` 续轮计数上限在真实会话中的表现**，以及 `PermissionRequest`/`PostToolUseFailure`
+两个本项目未使用事件的运行态行为。

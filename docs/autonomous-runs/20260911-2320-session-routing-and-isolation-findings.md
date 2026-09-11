@@ -19,6 +19,10 @@
    worker，横跨 6 个不同 workspace**，且其中一个 workspace 下有 2 个 worker 并行争抢；累计 5 条
    completion 因指向失效 workspace 而永久滞留 pending。精确清单见 §4.1（已于 2026-09-11 23:15 清理，
    原始快照备存于 `~/.codex-as-subagent/backup-20260911-2330/`）。
+7. **ZCode 同样存在 session 级串投，已在无 Kimi worker 干扰的干净环境中复现（§2.3）**：两个真实 ZCode
+   会话并发于同一 workspace 时，A 发起并仍存活的 subagent completion 被投递进 B，A 自身未收到；
+   `delivery_id` 为**普通 UUID**，确认由 ZCode 自身 Hook 领取，而非 Kimi 残留 worker。这补齐了 §2.2
+   首轮复验受干扰留下的缺口，把 §5 的 ZCode 判定从「复验中」改为「是」。
 
 ## 2. 现象
 
@@ -30,11 +34,57 @@
   （`Codex subagent 01a090eb-… completed (6b01f85c) … 2+2 等于 4`），`updated_at = 22:42:18`，与投递时刻吻合。
 - 该 completion 在 SQLite 中为 `delivery_state='delivered'`、`delivery_id='kimi-web-6a83b688-…'`。
 
-### 2.2 ZCode 复验受 Kimi worker 干扰（另一会话观察）
+### 2.2 ZCode 首轮复验受 Kimi worker 干扰（另一会话观察，已由 §2.3 绕过）
 
 另一会话在 ZCode 复验同款问题时发现结果受**当前正在运行的 Kimi worker** 影响。该观察与 2.1 的机制一致：
 两个 Host 共享同一 SQLite 与同一 Runtime Server，Kimi 侧残留 worker 可在约 1 秒内领走任意 workspace 的
 pending completion（`delivery_id` 形如 `kimi-web-<uuid>`），使 ZCode 路径的观测被污染。
+
+干扰只发生在**与 Kimi worker 同 workspace** 的复验上。Kimi worker 的 workspace 在启动时即固定
+（`kimi-web --worker --workspace=<固定值>`，见 `src/cli/kimi-web.mjs`），**不会轮询其它 workspace**；
+因此换一个全新的空 workspace 做实验即可天然避开干扰，无需停止任何 worker。
+
+### 2.3 ZCode：同 workspace 两会话串投（已在干净环境复现）
+
+两轮 E2E，均在**全新空 workspace**（本机 Kimi worker 无一绑定到该路径）内进行，completion 的
+`delivery_id` 均为**普通 UUID**（非 `kimi-web-` 前缀），确认为 ZCode 自身 Hook 领取：
+
+**第 1 轮——`/private/tmp/cas-zcode-e2e/ws`**
+
+- 会话 A（用 raw MCP 客户端在 cwd=该 workspace 调 `codex_spawn`，避免触发 A 自身 Hook 污染实验）：
+  threadId `01a09102-456f-7011-b76b-b9d2178967f5`，completion `d488ba71-…`，落 pending 于
+  `2026-09-11T15:07:45.400Z`。
+- 会话 B（真实 headless ZCode 会话 `sess_f44d023b-4a17-4da8-ad86-e39f5b59405e`，cwd 相同）：
+  其 rollout 中 `UserPromptSubmit` 的 additionalContext 原文出现 A 的 completion：
+  ```
+  <system-reminder>
+  UserPromptSubmit hook additional context:
+  #1
+  Codex subagent 01a09102-456f-7011-b76b-b9d2178967f5 completed (d488ba71)
+  /private/tmp/cas-zcode-e2e/ws
+  4
+  </system-reminder>
+  ```
+- 该 completion `delivery_id=150fecdf-fd72-4db0-a476-c57a456034db`（普通 UUID）。
+
+**第 2 轮（对照，排除「A 已退出」的解释）——`/private/tmp/cas-zcode-e2e/ws3`，两个真实 ZCode 会话并发**
+
+- 会话 A = `sess_c1276898-e635-46c6-8c46-2d2da6aacf81`：`codex_spawn` 后紧接着执行 `sleep 90`
+  **保持存活**，threadId `01a09106-3673-74a0-8ad6-27945dac631f`，completion `293047f6-…`。
+- 会话 B = `sess_01134803-e5fc-4c49-aeab-6c58f6ba816c`：触发 Hook 后**收到了该 completion**；
+  而发起它的 A 全程存活却**没有收到**。
+- `delivery_id=5f854571-c8f0-4382-85e6-4a2dee207234`（普通 UUID）。
+
+结论：**ZCode 复现同款 session 级串投**，且与「发起方是否仍存活」无关——同一 workspace 下谁先触发
+Hook 谁就领走，领取谓词只有 `workspace`，没有 session。
+
+### 2.4 附带发现：宿主退出会连坐杀掉 Server，completion 来不及落盘
+
+第 2 轮首次尝试（workspace `ws2`）中，真实 headless 会话 A 调 `codex_spawn` 后立即退出，其拉起的
+Runtime Server 随即收到 `SIGINT` 并 `serve.closed`（`server.log` 有 `serve.signal {"signal":"SIGINT"}`），
+**completion 从未落盘**，threadId 只留在 A 的会话上下文里。这与「宿主退出丢 completion」属同一类
+生命周期问题：单实例 Server 与宿主进程的存活边界没有解耦，异步 subagent 的结果可能随宿主退出而丢失。
+第 2 轮最终改以「A 存活（`sleep 90`）+ B 触发」的方式完成对照，未受此影响。
 
 ## 3. 根因分析（三层）
 
@@ -95,6 +145,10 @@ pending completion（`delivery_id` 形如 `kimi-web-<uuid>`），使 ZCode 路�
 | 8 | Kimi 仅 `UserPromptSubmit`/`PreToolUse`/`Stop` 能影响主流程，`PostToolUse` 等为 observation-only | 知识库 §21 |
 | 9 | Server 在 completion 落地那一刻必定存活 | `LifecycleManager.isIdle()` 要求活跃 execution=0，而 execution 恰在 terminal 落库时删除；`server.log` 实证 |
 | 10 | 孤儿 worker 真实存活并抢走新会话 completion | `ps` 显示 PID 48074（ppid=1，17:39 启动）仍在轮询 |
+| 11 | **ZCode 同 workspace 两会话真实串投**（第 1 轮） | 会话 B `sess_f44d023b-…` 的 rollout 中 `UserPromptSubmit` additionalContext 原文含 A 的 threadId `01a09102-…` 与短 id `(d488ba71)` |
+| 12 | **串投由 ZCode 自身 Hook 领取，非 Kimi worker** | `delivery_id=150fecdf-…`（普通 UUID，无 `kimi-web-` 前缀）；第 2 轮同型证据 `delivery_id=5f854571-…` |
+| 13 | **发起方会话存活期间仍丢投**（第 2 轮对照） | 两个真实 ZCode 会话并发，A `sess_c1276898-…` 存活（`sleep 90`），completion `293047f6-…` 仍进 B `sess_01134803-…`、A 未收到 |
+| 14 | 干扰可被干净 workspace 天然规避 | Kimi worker 的 `--workspace` 启动时固定，不轮询其它路径；两轮实验 workdir 均为 `/private/tmp/cas-zcode-e2e/ws{,3}`，无 worker 绑定 |
 
 ### 4.1 清理前系统状态快照（2026-09-11 23:15 清理，原始快照备存）
 
@@ -162,7 +216,7 @@ worker，垃圾会重新产生。真正的根治依赖第 6 节的隔离方案�
 |---|---|---|---|
 | Kimi Web | detached 常驻 worker 轮询 → Server API prompt/steer | **是（已实证）** | 因孤儿 worker，**必然发生** |
 | Kimi TUI | 宿主按事件现起 `hook --host=kimi-code` | 未实测 | 结构缺陷相同；无常驻竞争，**仅当同 workspace 有 ≥2 并发活跃会话时**可能发生 |
-| ZCode | 宿主按事件现起 `hook --host=zcode` | 复验中（受 Kimi worker 干扰） | 同上；**且会被 Kimi 残留 worker 跨 Host 抢占** |
+| ZCode | 宿主按事件现起 `hook --host=zcode` | **是（已复现，见 §2.3）** | 结构缺陷相同：无 ZCode 常驻 worker，仅当同 workspace 有 ≥2 并发会话时发生；**且会被 Kimi 残留 worker 跨 Host 抢占** |
 
 ## 6. 下一步意图（用户 2026-09-11 口述，方案待定稿）
 
