@@ -5,6 +5,8 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { serve } from './serve.mjs';
 import { mcp } from './mcp.mjs';
+import { hook } from './hook.mjs';
+import { drain } from './drain.mjs';
 
 const commands = [
   ['serve', '启动 Runtime Server'],
@@ -61,6 +63,8 @@ export async function main(argv = process.argv.slice(2)) {
     return 0;
   }
   if (command === 'mcp') return await mcp(argv.slice(1));
+  if (command === 'hook') return await hook(argv.slice(1));
+  if (command === 'drain') return await drain(argv.slice(1));
 
   console.error(`未知命令: ${command}`);
   console.error('运行 codex-as-subagent --help 查看帮助。');

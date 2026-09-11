@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codex-as-subagent": {
+      "command": "codex-as-subagent",
+      "args": ["mcp"]
+    }
+  }
+}

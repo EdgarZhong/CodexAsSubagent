@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "hooks": [
+    {
+      "event": "after_turn",
+      "command": "codex-as-subagent hook --host=zcode"
+    }
+  ]
+}
