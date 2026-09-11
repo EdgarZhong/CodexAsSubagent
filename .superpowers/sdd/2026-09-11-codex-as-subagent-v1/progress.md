@@ -33,7 +33,8 @@
 - Task 2: complete
 - Task 3: complete (commits 5b7b533..b5b62a3, review clean)
 - Task 4: complete (commit 955d810, main-agent self-review and tests passed)
-- Task 5: active (direct implementation; no subagent handoff)
+- Task 5: complete (commit 1d875d8, main-agent self-review and tests passed)
+- Task 6: active (direct implementation; no subagent handoff)
 - Task 6: pending
 - Task 7: pending
 - Task 8: pending
@@ -57,3 +58,4 @@
 - Task 3: fix round 5/5 implementation and report committed as 23863ec..b5b62a3; scoped re-review verdict: all findings addressed, no new Critical/Important breakage.
 - Autonomous round 2 scope: implement Task 4 RuntimeManager and Task 5 Server/Bootstrap foundations sequentially; use lightweight task reviews, then continue to Task 6/7 in the next round.
 - Task 4: complete (commit 955d810, focused 12/12 and full 59/59; implementation self-review found and fixed fast terminal-event race and batch ACK binding).
+- Task 5: complete (commit 1d875d8, focused 6/6 and full 65/65; Unix socket, Bootstrap ACK, startup lock, lifecycle and recovery tests passed).
