@@ -34,8 +34,8 @@
 - Task 3: complete (commits 5b7b533..b5b62a3, review clean)
 - Task 4: complete (commit 955d810, main-agent self-review and tests passed)
 - Task 5: complete (commit 1d875d8, main-agent self-review and tests passed)
-- Task 6: active (direct implementation; no subagent handoff)
-- Task 6: pending
+- Task 6: complete (focused 8/8, full 71/71, CLI JSON-RPC smoke passed; report task-6-report.md)
+- Task 6: complete (direct implementation; no subagent handoff)
 - Task 7: pending
 - Task 8: pending
 
