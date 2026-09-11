@@ -55,8 +55,17 @@
 2. **Hook 回流注入（修复后通过）**：completion 处于 pending 时运行 `hook --host=zcode --data-dir <d> --workspace <ws>`，stdin 传 `{"hook_event_name":"UserPromptSubmit",...}`。结果：stdout 为严格 JSON `{"additionalContext":"Codex subagent <thread> completed (<id>)\nHOOK-OK"}`，completion 转 `delivered`。
 3. **回归**：`npm test` 90/90、`npm run lint`、`npm run smoke` 全通过（基线 80/80 → 新增 10 项）。
 
+## 生产路径实测（干净进程 + 本会话真实 Stop hook）
+
+在用户要求下，本轮追加了一次不带任何沙箱的**生产路径**验证：使用默认数据目录 `~/.codex-as-subagent`、生产 workspace（仓库根）、全新 MCP 进程。
+
+1. **干净生产进程启动**：`node src/cli/main.mjs mcp`（无 `--data-dir`）冷启动，`initialize` 返回 `serverInfo={name:"codex-as-subagent",version:"0.1.0"}`；`tools/list` 恰好 10 个工具。生命周期日志：`serve.start{dataDir:"~/.codex-as-subagent", idleShutdownMs:3000}` → `serve.listening` → turn 结束后 `serve.shutdown{reason:"idle"}` → `serve.closed`。
+2. **真实 spawn + 脚本触发 Hook**：真实 gpt-5.6-luna 子 agent（不 wait）→ completion `pending` → `hook --host=zcode`（stdin 传 Stop payload）输出严格 JSON `{"additionalContext":"...PROD-HOOK-OK","decision":"block","reason":"..."}`，completion 转 `delivered`。
+3. **本会话真实 Stop hook 端到端回流（最关键）**：留一条真实子 agent completion 处于 `pending`（消息 `LIVE-STOP-HOOK-OK`）后结束本轮。ZCode 会话**自身的 Stop hook 自动执行**了 `hook --host=zcode`，将 completion 作为 `additionalContext` 注入（并带 `decision:block` 触发续轮），completion 于 `2026-09-11T04:53:04Z` 转 `delivered`。这是不经任何脚本模拟、由 Host 真实驱动 `spawn 异步 → completion 落盘 → Stop hook 自动回流 → 续轮` 的完整用户路径实证。
+4. **环境自清理**：验证后无残留 serve、无残留 app-server，executions 归零。
+
 ## 遗留风险与后续
 
 - 缓存 patch 依赖手工本地化：ZCode **插件 update**（非 GUI 重启）会从源目录重同步，覆盖为裸命令 `codex-as-subagent`，而 GUI 子进程 PATH 不含它 → MCP 工具会消失。彻底解法是让 `plugins/zcode/.mcp.json` 走可发现的命令（如安装后软链进 PATH 或改用 `node`+相对解析）。
-- 未在本轮验证：真实 ZCode 会话内 Hook 两事件的端到端注入（当前用 stdin 模拟 payload 验证 wrapper 输出与状态机）；send/steer/interrupt 真实路径；崩溃恢复真实路径；MCP server 是否注入 session env。
+- 未在本轮验证：真实 ZCode 会话内 UserPromptSubmit 事件的端到端注入（Stop 事件已在本会话真实验证）；send/steer/interrupt 真实路径；崩溃恢复真实路径；MCP server 是否注入 session env。
 - `ZCODE_SESSION_ID` 已确认由 ZCode 注入，但 Bootstrap/Runtime 尚未消费它（session 隔离属 V2）。

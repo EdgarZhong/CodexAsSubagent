@@ -44,6 +44,7 @@
     - **② `--data-dir` 未透传**：bootstrap spawn serve 时漏传，导致 SQLite 落默认目录、与 socket/lock 分叉。已在 `stdio-bootstrap`/`startup-lock`/`mcp` 全链路透传；未显式给定时按 socket 所在目录推导。
     - **③ idle shutdown 不生效**：execution 在异步 terminal 事件里被移除后，没有任何请求边界再触发 idle 判定。已给 RuntimeManager 加 `subscribeStateChanges`，terminal/spawn/send 时主动通知 RuntimeServer 重算 idle；Server listen 后先 arm 一次。
     - **④ server 无法真正退出（孤儿进程）**：旧 shutdown 只关 SQLite，未终止 app-server 子进程，其 stdio 句柄拖住事件循环，`SIGTERM` 打不掉（已在真机复现：旧进程 SIGTERM 后仍存活并挂着活 app-server）。已给 adapter 加 `close()` 并纳入 `SUPERVISOR_ADAPTER_METHODS` 契约（fake 缺省为 no-op），RuntimeManager.close 变 async 并 await 之，Server 经 `onClosed` 统一收口 store。新增 `src/shared/server-log.mjs`，serve 生命周期日志写 `<data-dir>/server.log`（诊断可观测性缺口）。验证：真实 turn spawn 后 SIGKILL 宿主，completion 落盘（completed/pending）且 Server 随后 idle 自动退出；`hook --host=zcode` 输出严格 JSON `{"additionalContext":...}` 且 completion 转 delivered。回归 90/90。
+    - **生产路径全链路实证（2026-09-11 追加）**：默认数据目录 `~/.codex-as-subagent` 下冷启动干净 MCP 进程，`tools/list` 十工具齐全，真实 gpt-5.6-luna 子 agent spawn；**本 ZCode 会话自身的 Stop hook 自动执行了 `hook --host=zcode`**，将一条 pending completion 作为 additionalContext 注入并带 `decision:block` 续轮，completion 转 delivered——`spawn 异步 → 落盘 → Stop hook 自动回流 → 续轮`完整用户路径经 Host 真实驱动打通，非脚本模拟。
 
 ## 执行边界
 
