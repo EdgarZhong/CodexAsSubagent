@@ -15,6 +15,10 @@
    因此一个 Host 的残留 worker 可以领走另一个 Host 产生的 completion。
 5. 用户意图：**借此机会把隔离彻底做完整，至少三层——host、workspace、session**。
    具体方案待用户与更强模型讨论后定稿，本轮不实施。
+6. **清理前快照证据表明这是系统性问题，不是个例**：本机同时存在 **7 个已脱离宿主（ppid=1）的常驻
+   worker，横跨 6 个不同 workspace**，且其中一个 workspace 下有 2 个 worker 并行争抢；累计 5 条
+   completion 因指向失效 workspace 而永久滞留 pending。精确清单见 §4.1（已于 2026-09-11 23:15 清理，
+   原始快照备存于 `~/.codex-as-subagent/backup-20260911-2330/`）。
 
 ## 2. 现象
 
@@ -92,6 +96,66 @@ pending completion（`delivery_id` 形如 `kimi-web-<uuid>`），使 ZCode 路�
 | 9 | Server 在 completion 落地那一刻必定存活 | `LifecycleManager.isIdle()` 要求活跃 execution=0，而 execution 恰在 terminal 落库时删除；`server.log` 实证 |
 | 10 | 孤儿 worker 真实存活并抢走新会话 completion | `ps` 显示 PID 48074（ppid=1，17:39 启动）仍在轮询 |
 
+### 4.1 清理前系统状态快照（2026-09-11 23:15 清理，原始快照备存）
+
+以下数据取自清理前对 `~/.codex-as-subagent/state.sqlite` 与 `kimi-web-workers.json` 的只读读取，
+**清理后不可再生**，故在此留存。原始文件备份在 `~/.codex-as-subagent/backup-20260911-2330/`。
+
+**（a）常驻 worker registry：7 个，全部 ppid=1，横跨 6 个 workspace**
+
+| session_id | workspace | pid | 启动时刻 |
+|---|---|---|---|
+| session_75746fa9-… | /Users/edgar/code/Ebbinghaus | 45003 | 2026-09-11T09:35:29Z |
+| session_08e13c70-… | /Users/edgar/code/pi-web | 46849 | 2026-09-11T09:37:52Z |
+| session_f0bd28b5-… | /Users/edgar/scripts/xiaoe-m3u8-extract | 46991 | 2026-09-11T09:37:55Z |
+| session_d48bdbd0-… | **/Users/edgar/programs/CodexAsSubagent** | 48074 | 2026-09-11T09:39:21Z |
+| session_b4d1d29a-… | /Users/edgar/Documents/论文/0816 | 48313 | 2026-09-11T09:39:29Z |
+| session_131df6cf-… | **/Users/edgar/programs/CodexAsSubagent** | 88454 | 2026-09-11T14:40:45Z |
+| session_9010f852-… | /Users/edgar/code/intern/ReseachOS | 98031 | 2026-09-11T14:50:12Z |
+
+关键观察：
+
+- **7 个 worker 全部脱离宿主（ppid=1）**，且宿主早已退出——证明 `SessionEnd → --detach` 回收路径
+  在宿主异常退出时不执行，是**系统性**而非偶发。
+- **同 workspace（`CodexAsSubagent`）下有 2 个 worker 并行**（`d48bdbd0` 属已停止的旧会话、
+  `131df6cf` 属当时活跃会话）——这正是 §2.1 串投的直接竞争结构。
+- 最早一批 worker（09:35–09:39 启动）**存活超过 13 小时**，期间持续每秒轮询共享 SQLite。
+
+**（b）化石 pending completion：5 条（此前记录为 4 条，遗漏了 ZCode E2E 新产生的一条）**
+
+| completion_id | workspace | terminal_status | 滞留原因 |
+|---|---|---|---|
+| 0accef59-… | /private/tmp/cas-e2e-ws | failed | 临时 workspace 已消失 |
+| 59648912-… | /private/tmp/cas-e2e-ws | completed | 临时 workspace 已消失 |
+| 77a2284d-… | ~/.kimi-code/plugins/managed/codex-as-subagent | completed | 插件目录，已 fail-closed 不可领 |
+| 5992c796-… | ~/.kimi-code/plugins/managed/codex-as-subagent | completed | 同上 |
+| 70ec8d65-… | /private/tmp/cas-zcode-e2e/ws2 | failed | 临时 workspace 已消失 |
+
+**（c）清理前投递分布**
+
+- `completions` 共 30 行：`delivered` 25、`pending` 5、`claimed_*` 0。
+- 25 条 `delivered` 中，**`delivery_id` 带 `kimi-web-` 前缀的仅 2 条**（其中一条即 §2.1 的错投），
+  其余 23 条为普通 UUID。注意：普通 UUID 同时覆盖 ZCode/Kimi TUI 的 Hook 领取与 `codex_wait` 的
+  direct 投递，**无法仅凭前缀区分**，故这里只作通道量级参考，不用于归因。
+- 按 workspace 聚合的 completion 数：仓库根 17、`/private/tmp/cas-e2e-ws` 6、
+  插件目录 4、`/private/tmp/cas-zcode-e2e/ws{,2,3}` 各 1。
+
+**（d）清理动作与结果（2026-09-11 23:15）**
+
+先备份后清理：备份 `~/.codex-as-subagent/backup-20260911-2330/`（含 `state.sqlite` + WAL/SHM 与
+`kimi-web-workers.json` 原始副本）；对上述 7 个 PID 发 SIGTERM 并确认全部退出；按 `completion_id`
+精确删除 5 条 pending（保留 25 条已投递历史）；`kimi-web-workers.json` 置为 `{}`；
+`PRAGMA wal_checkpoint(TRUNCATE)` 回收膨胀至约 400KB 的 WAL。
+
+校验结果：残留 worker 进程 0；registry `{}`；`PRAGMA integrity_check` = ok；
+pending/claimed/delivered/executions = 0/0/25/0。
+
+**（e）重要前提：清理是时点性的，非根治**
+
+插件的 `SessionStart`/`TurnStarted` attach hook 仍然挂着，任何 Kimi 会话再次触发即会重新拉起
+worker，垃圾会重新产生。真正的根治依赖第 6 节的隔离方案落地（替换常驻轮询为事件驱动，
+并补齐 host / session 隔离）。
+
 ## 5. 各模式影响判定
 
 | 模式 | 回流路径 | 是否已复现串投 | 判定 |
@@ -121,11 +185,21 @@ V1 只完成了 workspace 一层隔离，**应补齐为至少三层**：
 
 - 不修改任何源码。
 - 不实现 session/host 隔离。
-- 不删除或停止任何运行中的 worker 进程（需用户单独确认）。
+- 清理测试垃圾另经用户单独授权执行，不属本节范围（见 §4.1(d) 与 §8）。
 
-## 8. 遗留清理项（待实施轮确认）
+## 8. 遗留清理项（已于 2026-09-11 23:15 清理）
 
-- `~/.codex-as-subagent/state.sqlite` 中 4 条永不投递的历史 pending：
-  2 条 `workspace=/private/tmp/cas-e2e-ws`、2 条 `workspace=~/.kimi-code/plugins/managed/codex-as-subagent`。
-- `~/.codex-as-subagent/kimi-web-workers.json` 中已失效的孤儿 worker 记录（含 `session_d48bdbd0` 等）。
-- 运行中的孤儿 worker 进程（至少 PID 48074 已确认）。
+清理前盘点出的三类测试垃圾**均已清理**（清单与校验见 §4.1(d)）：
+
+- `~/.codex-as-subagent/state.sqlite` 中 5 条永不投递的历史 pending（2 条 `cas-e2e-ws`、
+  2 条插件目录、1 条 `cas-zcode-e2e/ws2`）——已精确删除；25 条已投递历史保留。
+- `~/.codex-as-subagent/kimi-web-workers.json` 中 7 条失效孤儿 worker 记录——已置为 `{}`。
+- 7 个运行中的孤儿 worker 进程（含 `session_d48bdbd0` 的 PID 48074）——已 SIGTERM 并确认退出。
+
+原始状态已在清理前完整备份于 `~/.codex-as-subagent/backup-20260911-2330/`，可回滚。
+
+**未清理（有意保留）**：`mcp-debug` 标志文件与 `mcp-debug.log`（`stdio-bootstrap` 中标志文件门控的
+调试探针，默认零开销，排查隔离问题时仍可能有用）。如需清理需单独确认。
+
+**注意**：本次为时点清理，attach hook 未移除，worker 会随下一次 Kimi `TurnStarted` 重新产生
+（见 §4.1(e)）。

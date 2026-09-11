@@ -140,7 +140,7 @@ Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP�
 | docs/Codex As Subagent — 详细设计与编码规格.md | V1 权威设计与编码规格 |
 | docs/superpowers/plans/2026-09-11-codex-as-subagent-v1.md | 本轮实现计划、接口和测试任务 |
 | docs/autonomous-runs/ | 用户级验收快照与结果 |
-| docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md | Completion 回流串线排查（host/workspace/session 三层隔离缺失）与下一步意图（2026-09-11） |
+| docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md | Completion 回流串线排查（host/workspace/session 三层隔离缺失）、清理前系统快照与下一步意图（2026-09-11） |
 | docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md | 十工具真实 ZCode 会话 E2E、PostToolUse 中途回流与中断协议修复（2026-09-11） |
 | docs/autonomous-runs/20260911-1701-kimi-code-integration.md | Kimi Code TUI/Web 插件、安装器与 completion 回流验收 |
 | docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md | ZCode 插件真实路径验收：4 处缺陷修复与 Hook 回流打通（2026-09-11） |
