@@ -619,6 +619,23 @@ export class RuntimeManager {
     return Boolean(acknowledged?.acknowledged);
   }
 
+  // Runtime Server uses these bridges to keep delivery ids out of the public API.
+  deliveryIdFor(value) {
+    return this.deliveryIds.get(value) ?? null;
+  }
+
+  ackDeliveryId(deliveryId) {
+    if (typeof deliveryId !== 'string' || deliveryId.length === 0) return false;
+    const acknowledged = this.completionStore.ackDelivery({ deliveryId, now: isoNow(this.clock) });
+    return Boolean(acknowledged?.acknowledged);
+  }
+
+  releaseDeliveryId(deliveryId) {
+    if (typeof deliveryId !== 'string' || deliveryId.length === 0) return false;
+    const released = this.executionStore.releaseReservation({ reservationId: deliveryId });
+    return Boolean(released?.released);
+  }
+
   async listThreads(ctx) {
     const workspace = await this.#workspace(ctx);
     let result;
