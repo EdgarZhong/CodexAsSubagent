@@ -1723,6 +1723,15 @@ idle shutdown
 
 选中后记录 `{binary 绝对路径, version, schema hash}`；Server 单次生命周期内绝不切换 binary；每次冷启动重新执行发现与探测（App 自动更新可能在同一路径下替换实现）。全部候选失败时 fail-closed，`doctor` 输出各候选诊断，并建议官方 standalone 安装（`curl -fsSL https://chatgpt.com/codex/install.sh | sh`，支持 `--release X.Y.Z` pin）。
 
+> **实现状态（2026-09-11）**：已落地于 `src/shared/codex-runtime.mjs` 与 `src/cli/serve.mjs`。
+> - `codexBinaryCandidates()` 按上述顺序生成候选取并集（去重）。
+> - `probeCodexRuntime()` 逐候选执行完整三段探测；`REQUIRED_APP_SERVER_METHODS` 列出 adapter 依赖的九个 wire method（thread/start、thread/resume、turn/start、turn/steer、turn/interrupt、thread/list、thread/read、model/list、config/read），schema 文本缺任一即拒绝该候选。
+> - `serve` 冷启动时调用，选中后把 `{binary, args}` 显式传给 adapter 并在生命周期内固定；失败则记录 `codex.discovery.failed` 并 fail-closed（不启动 Server）。
+> - `resolveAppServerArgs()` 保证缺省为干净的 `["app-server"]`，不受 vendor 默认参数影响（见决策 12）。
+> - 实测：本机跳过 30 个不存在候选，命中 ChatGPT.app 内嵌 0.153.4，全流程 107ms；serve 在无 `CODEX_BIN` 时自主发现并正常启动。
+>
+> **与安装脚本的关系**：安装脚本（方式 B）可选择把 `CODEX_BIN` 作为显式配置写进插件 env（优先级 0 的提前命中，属优化而非必需）；**真正的发现与探测始终由 Server 启动时执行**，因此不依赖安装期环境。
+
 第三方永远自起 `codex app-server` 子进程，不 attach Desktop 或 managed daemon 的已有实例（daemon 官方仍标记 experimental；一个 active thread 只能有一个 runtime owner）。
 
 ---

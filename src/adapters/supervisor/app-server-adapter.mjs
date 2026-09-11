@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 
 import { AppServerClient } from '../../../vendor/codex-supervisor-mcp/src/app-server-client.mjs';
 import { EventStore } from '../../../vendor/codex-supervisor-mcp/src/event-store.mjs';
+import { discoverCodexBinary, resolveAppServerArgs } from '../../shared/codex-runtime.mjs';
 import { normalizeEvent } from './protocol-normalizer.mjs';
 
 export const SUPERVISOR_ADAPTER_METHODS = Object.freeze([
@@ -112,8 +113,20 @@ export function createSupervisorAdapter(options = {}) {
   const suppliedClient = options.client ?? options.appServerClient;
   const suppliedEventStore = options.eventStore ?? suppliedClient?.eventStore;
   const eventStore = suppliedEventStore ?? new BridgedEventStore(runtimeEvents, options.eventStoreOptions);
+  // 设计 6.4：缺省 CODEX_BIN 时必须自动发现为绝对路径。GUI Host 拉起的进程
+  // PATH 可能不含用户安装路径，仅靠 vendor 默认的裸 "codex" 会启动失败。
+  const clientOptions = options.clientOptions ?? {};
+  const environment = options.env ?? process.env;
+  const resolvedCommand = clientOptions.command
+    ?? options.command
+    ?? (typeof environment.CODEX_BIN === 'string' && environment.CODEX_BIN.length > 0
+      ? environment.CODEX_BIN
+      : discoverCodexBinary({ env: environment }) ?? 'codex');
   const client = suppliedClient ?? new AppServerClient({
-    ...options.clientOptions,
+    ...clientOptions,
+    command: resolvedCommand,
+    args: clientOptions.args ?? resolveAppServerArgs(environment),
+    env: environment,
     eventStore,
   });
 

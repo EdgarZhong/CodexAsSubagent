@@ -2,6 +2,7 @@
 
 import { DEFAULT_EFFORT, DEFAULT_MODEL } from '../shared/constants.mjs';
 import { resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { serve } from './serve.mjs';
 import { mcp } from './mcp.mjs';
@@ -74,6 +75,18 @@ export async function main(argv = process.argv.slice(2)) {
   return 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+// 通过软链或 npm 全局安装调用时 process.argv[1] 是软链路径，
+// 与 moduleUrl（真实路径）不同；必须 realpath 归一化后再比较，
+// 否则入口守卫不成立，命令会静默不执行。
+export function isDirectInvocation(argv1, moduleUrl) {
+  if (!argv1) return false;
+  try {
+    return pathToFileURL(realpathSync(argv1)).href === moduleUrl;
+  } catch {
+    return moduleUrl === pathToFileURL(resolve(argv1)).href;
+  }
+}
+
+if (isDirectInvocation(process.argv[1], import.meta.url)) {
   process.exitCode = await main();
 }

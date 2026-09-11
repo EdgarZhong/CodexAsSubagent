@@ -1,8 +1,10 @@
 import { access, copyFile, cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve, sep } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { discoverCodexBinary as discoverCodexBinaryShared } from '../shared/codex-runtime.mjs';
 
 // src/install/zcode-plugin.mjs -> 仓库根（npm 全局安装时同样成立，因包内保持同一相对结构）
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -79,30 +81,12 @@ async function isExecutable(path) {
   }
 }
 
-function searchPath(name, env = process.env) {
-  const path = env.PATH;
-  if (typeof path !== 'string' || path.length === 0) return [];
-  return path.split(sep === '\\' ? ';' : ':')
-    .filter((entry) => entry.length > 0)
-    .map((entry) => join(entry, name));
-}
-
-// 探测可用的 Codex 运行时。GUI 子进程 PATH 已被 ZCode 填充，但仍以绝对路径写入最稳。
-export async function discoverCodexBinary({ env = process.env, exists = isExecutable } = {}) {
-  const candidates = [
-    env.CODEX_BIN,
-    env.CODEX_AS_SUBAGENT_CODEX_BIN,
-    ...searchPath('codex', env),
-    join(homedir(), '.local', 'bin', 'codex'),
-    '/opt/homebrew/bin/codex',
-    '/usr/local/bin/codex',
-    '/Applications/ChatGPT.app/Contents/Resources/codex',
-    '/Applications/Codex.app/Contents/Resources/codex',
-  ];
-  for (const candidate of candidates) {
-    if (await exists(candidate)) return candidate;
-  }
-  return null;
+// 与 Server 端共用设计 6.4 的解析顺序，避免两份实现漂移。
+// 注意：这是"存在性"快速选择，只用于把 CODEX_BIN 作为显式配置写进插件 env（优先级 0 的
+// 提前命中，属可选优化）。真正的能力探测在 Server 冷启动时执行（probeCodexRuntime），
+// 因此即使此处未命中，运行时仍会自动发现。
+export async function discoverCodexBinary({ env = process.env } = {}) {
+  return discoverCodexBinaryShared({ env, exists: isExecutable });
 }
 
 // 把插件里的裸命令改写成 `node <cli>`，使插件不依赖 PATH 解析我们的命令。

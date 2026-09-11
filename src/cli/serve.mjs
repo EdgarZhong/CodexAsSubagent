@@ -14,6 +14,7 @@ import { createRuntimeServer } from '../server/server.mjs';
 import { recoverState } from '../server/recovery.mjs';
 import { createServerLogger } from '../shared/server-log.mjs';
 import { option } from '../shared/argv.mjs';
+import { probeCodexRuntime } from '../shared/codex-runtime.mjs';
 
 export async function serve(argv = []) {
   const dataDir = option(argv, '--data-dir', DEFAULT_DATA_DIR);
@@ -22,8 +23,26 @@ export async function serve(argv = []) {
   const idleShutdownMs = Number(option(argv, '--idle-shutdown-ms', '3000'));
   const logger = createServerLogger({ dataDir });
   logger.info('serve.start', { dataDir, socketPath, lockPath, idleShutdownMs });
+
+  // 设计 6.4：每次冷启动都重新发现 Codex runtime（App 自动更新可能替换同路径实现），
+  // 探测通过后本次生命周期内固定该 binary，绝不中途切换。
+  const { selected, diagnostics } = await probeCodexRuntime();
+  if (!selected) {
+    const detail = diagnostics.map((entry) => `${entry.candidate}: ${entry.ok ? 'ok' : entry.reason}`).join('; ');
+    logger.error('codex.discovery.failed', { diagnostics });
+    throw new Error(`未找到可用的 Codex app-server runtime（按设计 6.4 探测失败）：${detail}`);
+  }
+  logger.info('codex.selected', {
+    binary: selected.binary,
+    version: selected.version,
+    schemaHash: selected.schemaHash,
+    args: selected.args,
+  });
+
   const store = openSqliteStore(dataDir);
-  const adapter = createSupervisorAdapter();
+  const adapter = createSupervisorAdapter({
+    clientOptions: { command: selected.binary, args: selected.args },
+  });
   const executions = createExecutionStore(store);
   const completions = createCompletionStore(store);
   const router = createCompletionRouter({ executions, completions });
