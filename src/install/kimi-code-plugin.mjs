@@ -1,4 +1,4 @@
-import { access, copyFile, cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, chmod, copyFile, cp, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,10 @@ export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 
 export const PLUGIN_SOURCE_DIR = join(REPO_ROOT, 'plugins', 'kimi-code');
 export const CLI_ENTRY = join(REPO_ROOT, 'src', 'cli', 'main.mjs');
 export const PLUGIN_NAME = 'codex-as-subagent';
+// Kimi 对插件 MCP command 的硬约束：只能是裸 PATH 命令或以 "./" 开头（相对插件根目录），
+// 含 "/" 的绝对路径会被静默丢弃。因此安装器在托管副本内生成 launcher 脚本承载绝对路径。
+export const MCP_LAUNCHER_REL = 'bin/cas-run';
+export const MCP_LAUNCHER_COMMAND = `./${MCP_LAUNCHER_REL}`;
 
 export function resolveKimiCodeHome(options = {}) {
   const explicit = options.kimiCodeHome;
@@ -76,19 +80,23 @@ function hookCommand(command, { cliPath, execPath }) {
   return [quoteShell(execPath), quoteShell(cliPath), ...tokens].join(' ');
 }
 
-export function localizeKimiManifest(manifest, { cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
+export function renderMcpLauncher({ cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
+  return `#!/bin/sh\nexec ${quoteShell(execPath)} ${quoteShell(cliPath)} "$@"\n`;
+}
+
+export function localizeKimiManifest(manifest) {
   const servers = { ...(manifest?.mcpServers ?? {}) };
   const current = servers[PLUGIN_NAME] ?? {};
-  servers[PLUGIN_NAME] = {
-    ...current,
-    command: execPath,
-    args: [cliPath, ...(Array.isArray(current.args) ? current.args : ['mcp'])],
-  };
+  servers[PLUGIN_NAME] = { ...current, command: MCP_LAUNCHER_COMMAND };
+  return { ...manifest, mcpServers: servers };
+}
+
+export function localizeKimiHooks(manifest, { cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
   const hooks = (Array.isArray(manifest?.hooks) ? manifest.hooks : []).map((hook) => ({
     ...hook,
     command: hookCommand(hook.command, { cliPath, execPath }),
   }));
-  return { ...manifest, mcpServers: servers, hooks };
+  return { ...manifest, hooks };
 }
 
 function upsertPlugin(list, entry) {
@@ -132,9 +140,10 @@ export async function installKimiCodePlugin(options = {}) {
     dryRun,
     actions: [
       `copy ${pluginSource} -> ${paths.installPath}`,
+      `write MCP launcher ${MCP_LAUNCHER_COMMAND} -> ${execPath} ${cliPath}`,
       `register ${PLUGIN_NAME} in ${paths.installedPlugins}`,
       `enable ${PLUGIN_NAME}`,
-      `localize commands with ${execPath} ${cliPath}`,
+      'localize hook commands with absolute Node and CLI paths',
     ],
   };
   if (dryRun) return plan;
@@ -146,7 +155,11 @@ export async function installKimiCodePlugin(options = {}) {
 
   await mkdir(paths.managedDir, { recursive: true });
   await cp(pluginSource, paths.installPath, { recursive: true, force: true });
-  const localized = localizeKimiManifest(manifest, { cliPath, execPath });
+  const launcherPath = join(paths.installPath, MCP_LAUNCHER_REL);
+  await mkdir(dirname(launcherPath), { recursive: true });
+  await writeFile(launcherPath, renderMcpLauncher({ cliPath, execPath }), 'utf8');
+  await chmod(launcherPath, 0o755);
+  const localized = localizeKimiHooks(localizeKimiManifest(manifest), { cliPath, execPath });
   await writeJsonAtomic(join(paths.installPath, 'kimi.plugin.json'), localized);
   await writeJsonAtomic(paths.installedPlugins, installed);
   return plan;

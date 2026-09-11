@@ -25,7 +25,7 @@ npm run install:kimi-code
 安装器会：
 
 1. 把干净的 `plugins/kimi-code/` 拷贝到 `$KIMI_CODE_HOME/plugins/managed/codex-as-subagent/`（默认 `~/.kimi-code`）；
-2. 只在安装副本中把裸命令本地化为当前 Node + 当前安装包的绝对 CLI 路径；
+2. 只在安装副本中写入 launcher 脚本 `bin/cas-run`（内部 exec 当前 Node + 当前安装包的绝对 CLI 路径），并把 MCP `command` 本地化为 `./bin/cas-run`——Kimi 对插件 MCP command 只接受裸 PATH 命令或 `./` 相对插件根目录，绝对路径会被静默丢弃；Hook 命令走 shell，仍本地化为绝对路径；
 3. 原子更新 `$KIMI_CODE_HOME/plugins/installed.json`，保留其它插件与首次覆盖前的 `.bak-cas` 备份；
 4. 启用插件。重复执行幂等。
 

@@ -48,7 +48,7 @@
 本机开发、测试 Host 插件（MCP/Hook 注册、wrapper、manifest）时，固定走以下闭环，不依赖 GUI，不手工编辑宿主缓存：
 
 1. **只改仓库源码**：`plugins/<host>/` 下的资源文件，以及对应的 `src/` 实现（如 `src/hook/hosts/<host>.mjs`）。`plugins/<host>/` 中的资源保持**与宿主无关的干净形态**（如裸命令 `codex-as-subagent`），不要写入本机绝对路径。
-2. **用本项目二进制安装到宿主**：`node src/cli/main.mjs install --host=<host>`（或 `npm run install:<host>`）。安装器负责拷贝资源到宿主插件缓存、本地化命令为绝对路径、探测运行时（如 `CODEX_BIN`）、注册 marketplace 与安装记录、启用插件，并在覆盖前留备份。重复执行幂等。
+2. **用本项目二进制安装到宿主**：`node src/cli/main.mjs install --host=<host>`（或 `npm run install:<host>`）。安装器负责拷贝资源到宿主插件缓存、本地化命令（Hook 走 shell，本地化为绝对路径；Kimi MCP command 受宿主"裸 PATH 命令或 `./` 相对插件根目录"约束，由安装器在托管副本内生成 `bin/cas-run` launcher 承载绝对路径）、探测运行时（如 `CODEX_BIN`）、注册 marketplace 与安装记录、启用插件，并在覆盖前留备份。重复执行幂等。
 3. **重启宿主**（或新开会话）使配置生效。Hook 配置在会话启动时加载，MCP server 每会话新建进程，因此均需重启/新会话后才生效。
 4. **验证**：`<host> plugins list` 确认注册与 hooks 数量；再走一遍真实用户路径（spawn → completion 落盘 → Hook 回流）。
 
