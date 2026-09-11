@@ -3,6 +3,10 @@ import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 
 import { ensureServer } from '../server/startup-lock.mjs';
+import { errorCode } from '../shared/errors.mjs';
+import { projectPublic } from './response-projector.mjs';
+import { getToolCallDefinition, TOOL_DEFINITIONS } from './tool-registry.mjs';
+import { validateArguments } from './tool-handlers.mjs';
 import { resolveWorkspaceContext } from './workspace-context.mjs';
 
 function nextId() {
@@ -20,6 +24,38 @@ function defaultStartServer({ socketPath, lockPath }) {
     env: process.env,
   });
   child.unref();
+}
+
+const SERVER_INFO = Object.freeze({
+  name: 'codex-as-subagent',
+  version: '0.1.0',
+});
+
+function jsonRpcResult(id, result) {
+  return { jsonrpc: '2.0', id, result };
+}
+
+function jsonRpcError(id, code, message, data = undefined) {
+  return {
+    jsonrpc: '2.0',
+    id: id ?? null,
+    error: {
+      code,
+      message,
+      ...(data === undefined ? {} : { data }),
+    },
+  };
+}
+
+function toolContent(value) {
+  return [{ type: 'text', text: JSON.stringify(value) }];
+}
+
+function toolErrorContent(error) {
+  return toolContent({
+    code: errorCode(error),
+    message: error?.message ?? 'Tool call failed.',
+  });
 }
 
 export class StdioBootstrap {
@@ -110,6 +146,83 @@ export class StdioBootstrap {
     return publicResponse;
   }
 
+  async #forwardToolCall(id, name, args, context) {
+    try {
+      validateArguments(name, args);
+    } catch (error) {
+      return {
+        response: jsonRpcResult(id, {
+          content: toolErrorContent(error),
+          isError: true,
+        }),
+      };
+    }
+    const tool = getToolCallDefinition(name);
+    if (!tool) {
+      return { response: jsonRpcResult(id, {
+        content: toolErrorContent(new Error(`Unknown tool: ${name}`)),
+        isError: true,
+      }) };
+    }
+    const response = await this.forward({ id, method: tool.method, params: args }, context);
+    const value = response.error ? response.error : projectPublic(response.result);
+    const result = {
+      content: response.error ? toolErrorContent(response.error) : toolContent(value),
+      isError: Boolean(response.error),
+    };
+    return {
+      response: jsonRpcResult(id, result),
+      deliveryId: response.deliveryId ?? null,
+    };
+  }
+
+  async handleMcpRequest(request, context) {
+    const id = request?.id ?? null;
+    const method = request?.method;
+    if (typeof method !== 'string') {
+      return jsonRpcError(id, -32600, 'Request method is required.');
+    }
+    if (method === 'notifications/initialized' || method.startsWith('notifications/')) return null;
+    if (method === 'ping') return jsonRpcResult(id, {});
+    if (method === 'initialize') {
+      return jsonRpcResult(id, {
+        protocolVersion: '2024-11-05',
+        capabilities: { tools: {} },
+        serverInfo: SERVER_INFO,
+      });
+    }
+    if (method === 'tools/list') {
+      return jsonRpcResult(id, { tools: TOOL_DEFINITIONS });
+    }
+    if (method !== 'tools/call') return jsonRpcError(id, -32601, `Method not found: ${method}`);
+    const params = request.params && typeof request.params === 'object' ? request.params : {};
+    if (typeof params.name !== 'string' || params.name.length === 0) {
+      return jsonRpcError(id, -32602, 'tools/call requires a tool name.');
+    }
+    const args = params.arguments === undefined ? {} : params.arguments;
+    let forwarded;
+    try {
+      forwarded = await this.#forwardToolCall(id, params.name, args, context);
+    } catch (error) {
+      const response = jsonRpcResult(id, {
+        content: toolErrorContent(error),
+        isError: true,
+      });
+      await this.#write(response);
+      return response;
+    }
+    const { response, deliveryId } = forwarded;
+    await this.#write(response);
+    if (deliveryId) {
+      try {
+        await this.forward({ id: nextId(), method: 'delivery.ack', params: { deliveryId } }, context);
+      } catch {
+        await this.forward({ id: nextId(), method: 'delivery.nack', params: { deliveryId } }, context).catch(() => {});
+      }
+    }
+    return response;
+  }
+
   async run() {
     const context = await resolveWorkspaceContext({ cwd: this.cwd, workspaceGuard: this.workspaceGuard });
     const lines = readline.createInterface({ input: this.stdin, crlfDelay: Infinity });
@@ -122,7 +235,23 @@ export class StdioBootstrap {
         await this.#write({ id: null, error: { code: 'invalid_json', message: 'Request must be JSON.' } });
         continue;
       }
-      await this.handleRequest(request, context);
+      const isMcp = request?.jsonrpc === '2.0'
+        || (typeof request?.method === 'string'
+          && (request.method === 'initialize'
+            || request.method === 'notifications/initialized'
+            || request.method === 'tools/list'
+            || request.method === 'tools/call'
+            || request.method === 'ping'
+            || request.method.startsWith('notifications/')));
+      if (isMcp) {
+        const response = await this.handleMcpRequest(request, context);
+        if (response) {
+          // tools/call writes inside handleMcpRequest after ACK-safe projection.
+          if (request.method !== 'tools/call') await this.#write(response);
+        }
+      } else {
+        await this.handleRequest(request, context);
+      }
     }
   }
 }

@@ -3,6 +3,8 @@
 import { DEFAULT_EFFORT, DEFAULT_MODEL } from '../shared/constants.mjs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { serve } from './serve.mjs';
+import { mcp } from './mcp.mjs';
 
 const commands = [
   ['serve', '启动 Runtime Server'],
@@ -39,7 +41,7 @@ function commandHelp(command) {
   ].join('\n');
 }
 
-export function main(argv = process.argv.slice(2)) {
+export async function main(argv = process.argv.slice(2)) {
   const [command] = argv;
   if (!command || command === '--help' || command === '-h') {
     console.log(rootHelp());
@@ -54,11 +56,17 @@ export function main(argv = process.argv.slice(2)) {
     }
   }
 
+  if (command === 'serve') {
+    await serve(argv.slice(1));
+    return 0;
+  }
+  if (command === 'mcp') return await mcp(argv.slice(1));
+
   console.error(`未知命令: ${command}`);
   console.error('运行 codex-as-subagent --help 查看帮助。');
   return 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  process.exitCode = main();
+  process.exitCode = await main();
 }
