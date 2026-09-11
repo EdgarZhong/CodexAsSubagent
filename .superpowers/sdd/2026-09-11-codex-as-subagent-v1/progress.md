@@ -36,7 +36,7 @@
 - Task 5: complete (commit 1d875d8, main-agent self-review and tests passed)
 - Task 6: complete (focused 8/8, full 71/71, CLI JSON-RPC smoke passed; report task-6-report.md)
 - Task 6: complete (direct implementation; no subagent handoff)
-- Task 7: pending
+- Task 7: complete (direct implementation; no subagent handoff)
 - Task 8: pending
 
 ## Review ledger
@@ -59,3 +59,4 @@
 - Autonomous round 2 scope: implement Task 4 RuntimeManager and Task 5 Server/Bootstrap foundations sequentially; use lightweight task reviews, then continue to Task 6/7 in the next round.
 - Task 4: complete (commit 955d810, focused 12/12 and full 59/59; implementation self-review found and fixed fast terminal-event race and batch ACK binding).
 - Task 5: complete (commit 1d875d8, focused 6/6 and full 65/65; Unix socket, Bootstrap ACK, startup lock, lifecycle and recovery tests passed).
+- Task 7: complete (focused 8/8, full 79/79, Hook/Drain CLI smoke passed; report task-7-report.md).

@@ -77,6 +77,12 @@ V1 固定公开以下十个工具：codex_spawn、codex_send、codex_steer、cod
 
 codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500 秒；工具不接受 cwd/workspace/sandbox/approval/event cursor/turnId 参数。当前 Host 的 canonical CWD 是唯一 workspace 边界。
 
+## Hook 与 ZCode 插件
+
+`codex-as-subagent hook --host=<host>` 从当前 canonical workspace 的 SQLite completion buffer 原子 claim pending completion，渲染后 ACK；`codex-as-subagent drain` 提供宿主无关的 plain 输出。Hook 不启动、恢复或中断 Codex thread。
+
+当前提供 `plugins/zcode/` 注册骨架：`.mcp.json` 注册 `codex-as-subagent mcp`，`hooks/hooks.json` 注册 `codex-as-subagent hook --host=zcode`，安装说明见 [plugins/zcode/README.md](plugins/zcode/README.md)。
+
 ## 开发测试闭环
 
 1. 先阅读详细设计、AGENTS.md 和 CLAUDE.md。
@@ -95,6 +101,7 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 | docs/Codex As Subagent — 详细设计与编码规格.md | V1 权威设计与编码规格 |
 | docs/superpowers/plans/2026-09-11-codex-as-subagent-v1.md | 本轮实现计划、接口和测试任务 |
 | docs/autonomous-runs/ | 用户级验收快照与结果 |
+| plugins/zcode/README.md | ZCode MCP/Hook 插件安装说明 |
 
 ## 许可证
 
