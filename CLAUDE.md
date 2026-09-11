@@ -13,9 +13,9 @@
 - [x] 创建 README.md、AGENTS.md、CLAUDE.md，明确三者职责。
 - [x] 初始化 Git 分支与 .gitignore，固定上游 codex-supervisor-mcp Submodule。
 - [x] 建立 package/CLI/源码目录和共享协议常量。
-- [ ] 实现 Supervisor Adapter、WorkspaceGuard、SQLite StateStore。
-- [ ] 实现 RuntimeManager、TerminalResult、CompletionRouter 与双消费者 delivery。
-- [ ] 实现 Unix Socket Runtime Server、stdio Bootstrap、lazy start、startup lock、idle shutdown 与 recovery。
+- [x] 实现 Supervisor Adapter、WorkspaceGuard、SQLite StateStore。
+- [x] 实现 TerminalResult、CompletionRouter、双消费者 delivery 与 RuntimeManager 控制路径。
+- [ ] 实现 Unix Socket Runtime Server、stdio Bootstrap、lazy start、startup lock、idle shutdown 与 recovery（当前进行中）。
 - [ ] 注册并实现十个 MCP 工具的稳定 schema 与 compact response projection。
 - [ ] 实现 Hook drain、lease 恢复和 Host wrapper；补齐 ZCode 插件配置。
 - [ ] 完成 unit/integration/smoke 回归、独立 Review 和用户级验收记录。
