@@ -33,6 +33,9 @@
 - [x] 完成 `~/.codex-as-subagent/config.toml` 可选增量覆写：平面键/table 前缀解析、`-c key=value` 注入 `app-server` 前、缺失文件不改参数、格式错误 fail-closed。
 - [x] 完成只读 `doctor` 诊断命令，并将 `npm run lint` 扩展为覆盖全部 `src/**/*.mjs` 的 Node 语法检查。
 - [x] 创建 GitHub 私有远端仓库 EdgarZhong/CodexAsSubagent（origin，默认分支 main），`codex/autonomous-v1` 全量 47 提交以 fast-forward 合并至 main 并推送（2026-09-11，用户授权；远端暂只有 main 分支）。
+- [x] Kimi 插件 MCP 工具暴露修复（2026-09-11）：manifest command 硬校验只允许裸命令或 `./` 相对插件根，旧安装器写 node 绝对路径导致 server 被宿主静默丢弃；改为插件内 launcher `bin/cas-run`，真实重装后十工具在 Web 会话全部暴露。
+- [x] 十工具真实 Kimi Web 会话实测（2026-09-11）：spawn/status/wait/steer/interrupt/send/wait_many/read_thread/list_threads/models 全部走通真实 gpt-5.6-luna；两处待对照规格（wait_many 对已消费线程报 `no_active_turn`、read_thread `status:"unknown"`）。
+- [ ] **MCP workspace 错配（当前阻塞，根因已定位未修复）**：Kimi 插件 MCP 以插件目录为 cwd 启动，bootstrap 用 `process.cwd()` 当 workspace → completion 落错 workspace、worker 永不投递、subagent 跑在插件目录。根因链、已排除方案、修复方案 A/B/C 与下一步 SOP 见 docs/autonomous-runs/20260911-1824-kimi-web-e2e-handoff.md。
 
 ### Backlog（V1 未完成项，按优先级）
 
@@ -42,7 +45,7 @@
 - [ ] **真实 ZCode `UserPromptSubmit` 事件端到端注入未验证**：Stop 与 PostToolUse 均已真机验证；UserPromptSubmit 只验证过 wrapper 输出形态。
 - [ ] **MCP server 是否注入 `ZCODE_SESSION_ID` 未确认**：影响 V2 session 隔离的取数方式。
 - [ ] **session 级隔离（V2）**：设计 6.2 末尾，V1 前提是单 workspace 单主会话。
-- [ ] **真实 Kimi Web Server E2E**：本轮以官方文档和 fake Server/SQLite 集成覆盖协议边界；待具备 Kimi Server 后执行 `/reload → MCP → spawn → Web prompt/steer → delivered` 路径。
+- [ ] **真实 Kimi Web Server E2E**：工具暴露与十工具实测已于 2026-09-11 完成；Web 主动回流被「MCP workspace 错配」阻塞，移交 docs/autonomous-runs/20260911-1824-kimi-web-e2e-handoff.md 的方案 A/B/C 与 SOP。
 
 ### 明确不做（V1 决定，非遗漏）
 
@@ -94,6 +97,9 @@
     - **影响面**：仅变更类操作失败（`codex_send`/`codex_steer`/`codex_interrupt`）；只读操作（`codex_status`/`codex_read_thread`）对锁定线程正常。协议层看不到锁：`Thread` 无锁字段，`ThreadStatus` 仅 `notLoaded|idle|systemError|active`。
     - **错误规范化（已完成）**：原始错误形状经裸探针确认 —— `AppServerError`，`code` 为数字 `-32600`（通用 JSON-RPC Invalid Request，**无专用码**），`message` 为 `thread <id> already has an active writer`，发生在 `thread/resume`。故识别只能依据 message。实现：`src/shared/errors.mjs` 新增 `ERROR_CODES.THREAD_LOCKED`、`normalizeSupervisorError()`（正则 `/already has an active writer/i`，幂等）与固定文案 `Thread is locked by another Codex client. Close that client or use a new thread.`；接入点两处 —— `asDomainError()`（`runtime-manager.mjs`）与模型可见出口 `toolErrorContent()`（`stdio-bootstrap.mjs`，覆盖未走 `asDomainError` 的裸 `resumeThread` 路径）。**只规范化这一个已知原因，其余上游错误一律原样透传**（code/message 均不改），已验证 `thread not loaded` 等仍原样返回。实测新 MCP 进程返回 `{"code":"thread_locked","message":"Thread is locked by another Codex client..."}`，无原文泄漏。该阶段回归 117/117；当前全量回归为 137/137。
     - 本轮实测细节见 docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md。注意：MCP bootstrap 是每会话新建进程，改动需新会话（或重启宿主）才在真实会话生效。
+
+19. Kimi 插件 MCP 工具暴露修复（2026-09-11，实证定案）：kimi 二进制 `normalizePluginMcpServer()` 对插件 manifest 的 MCP `command` 硬校验——只允许裸 PATH 命令或 `./` 开头（相对插件根，且 `isWithin` 限制在插件根内），违者推 warn diagnostic 后**静默丢弃整个 server**（无 spawn、无日志；hooks 走 shell 不受影响，故插件表现为"活着但无工具"）。修复：安装器生成插件内 launcher `bin/cas-run`（`exec <node> <repo>/src/cli/main.mjs "$@"`），manifest command 写 `./bin/cas-run`；对照组为官方插件 kimi-cu 的 `command:"sh", args:["./bin/kimi-cu-mcp"]`。真实重装后十工具在 Web 会话全部暴露并实测通过。
+20. Kimi 插件 MCP workspace 错配（2026-09-11 根因定位，修复方案待新会话验证）：插件 MCP 由宿主以 `cwd = config.cwd ?? pluginRoot` 启动（知识库 §18 描述的 `stdioCwd = workspace.cwd` 只对 workspace 级 MCP 成立，对插件 MCP 不成立），导致 bootstrap 的 `process.cwd()` workspace 全部落错。二进制取证已排除 roots/list（Client 无 capabilities.roots）、manifest cwd（限插件根内）、进程 env（无 session/workspace 变量）、父进程 cwd（全局 Server 不可靠）。已部署 initialize 探针（`<dataDir>/mcp-debug` 标志文件门控，写 `mcp-debug.log`）。候选方案：A=改用 Kimi 用户级 MCP 配置注册（回归 §18 原始设计，推荐）；B=initialize 若携带 workspace 则优先取之；C=上游报缺陷 + 本侧 fail-closed。无论何方案，检测到 cwd 落在 KIMI_PLUGIN_ROOT 内且无法确定 workspace 时必须 fail-closed。详见 docs/autonomous-runs/20260911-1824-kimi-web-e2e-handoff.md。
 
 ## 执行边界
 

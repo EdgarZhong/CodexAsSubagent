@@ -1,7 +1,8 @@
 import net from 'node:net';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
-import { dirname } from 'node:path';
+import { appendFile, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 
 import { ensureServer } from '../server/startup-lock.mjs';
 import { errorCode, normalizeSupervisorError } from '../shared/errors.mjs';
@@ -194,6 +195,27 @@ export class StdioBootstrap {
     };
   }
 
+  // 宿主协议探针：仅当 <dataDir>/mcp-debug 标志文件存在时，把 initialize 原文和
+  // 进程上下文追加到 <dataDir>/mcp-debug.log。用于确认宿主（如 Kimi 插件 MCP）
+  // 是否在 initialize 中携带 workspace 信息。调试通道，永不影响协议行为。
+  async #debugLogInitialize(request) {
+    if (typeof this.dataDir !== 'string' || this.dataDir.length === 0) return;
+    try {
+      const flag = join(this.dataDir, 'mcp-debug');
+      if (!(await stat(flag)).isFile()) return;
+      const line = `${JSON.stringify({
+        at: new Date().toISOString(),
+        pid: process.pid,
+        cwd: process.cwd(),
+        kimiPluginRoot: process.env.KIMI_PLUGIN_ROOT ?? null,
+        request,
+      })}\n`;
+      await appendFile(join(this.dataDir, 'mcp-debug.log'), line, 'utf8');
+    } catch {
+      // 调试日志失败必须静默。
+    }
+  }
+
   async handleMcpRequest(request, context) {
     const id = request?.id ?? null;
     const method = request?.method;
@@ -203,6 +225,7 @@ export class StdioBootstrap {
     if (method === 'notifications/initialized' || method.startsWith('notifications/')) return null;
     if (method === 'ping') return jsonRpcResult(id, {});
     if (method === 'initialize') {
+      await this.#debugLogInitialize(request);
       return jsonRpcResult(id, {
         protocolVersion: '2024-11-05',
         capabilities: { tools: {} },
