@@ -92,6 +92,16 @@ test('host wrappers remain isolated and stable completion ids remain visible', (
   assert.match(outputs[0], /subagent finished/);
 });
 
+test('zcode wrapper emits strict JSON and requests continuation only on Stop', () => {
+  const completions = [row('json-completion')];
+  const plain = JSON.parse(renderCompletions(completions, 'zcode'));
+  assert.match(plain.additionalContext, /json-completion/);
+  assert.equal(plain.decision, undefined);
+  const stop = JSON.parse(renderCompletions(completions, 'zcode', { event: 'Stop' }));
+  assert.equal(stop.decision, 'block');
+  assert.match(stop.additionalContext, /json-completion/);
+});
+
 test('drainPending can write through a backpressure-aware stream', async () => {
   const output = new PassThrough();
   const chunks = [];

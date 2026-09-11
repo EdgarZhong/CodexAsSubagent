@@ -2,7 +2,5 @@
   "name": "codex-as-subagent",
   "displayName": "Codex As Subagent",
   "version": "0.1.0",
-  "description": "将本机 Codex subagent runtime 注册到 ZCode，并回流异步 completion。",
-  "mcpConfig": "../.mcp.json",
-  "hooksConfig": "../hooks/hooks.json"
+  "description": "将本机 Codex subagent runtime 注册到 ZCode，并回流异步 completion。"
 }

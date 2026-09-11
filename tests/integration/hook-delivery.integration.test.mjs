@@ -69,7 +69,10 @@ test('Hook drains only current-workspace pending completions and ACKs after clai
   assert.equal(result.acknowledged, true);
   assert.equal(harness.completions.getCompletion('completion-current').deliveryState, 'delivered');
   assert.equal(harness.completions.getCompletion('completion-foreign').deliveryState, 'pending');
-  assert.match(result.text, /<zcode-additional-context>/);
+  assert.match(result.text, /thread-current/);
+  const parsed = JSON.parse(result.text);
+  assert.match(parsed.additionalContext, /thread-current/);
+  assert.equal(parsed.decision, undefined, 'non-Stop drain must not request continuation');
 });
 
 test('expired claimed Hook lease is requeued and delivered on a later drain', async (t) => {

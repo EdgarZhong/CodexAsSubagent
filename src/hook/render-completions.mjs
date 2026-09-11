@@ -51,11 +51,11 @@ function resolveHost(host) {
   return HOSTS.get(host);
 }
 
-export function renderCompletions(completions, host = 'plain') {
+export function renderCompletions(completions, host = 'plain', context = {}) {
   if (!Array.isArray(completions)) throw new TypeError('completions must be an array.');
   const wrapper = resolveHost(host);
   const text = completions.map(renderOne).join('\n\n');
-  const rendered = wrapper.wrap(text, completions);
+  const rendered = wrapper.wrap(text, completions, context);
   if (typeof rendered !== 'string') throw new TypeError('Host wrapper must return text.');
   return rendered;
 }

@@ -24,6 +24,7 @@ export async function drainPending({
   leaseMs,
   output = null,
   renderer = renderCompletions,
+  context = {},
 } = {}) {
   if (!store || typeof store.claimPendingHook !== 'function' || typeof store.ackDelivery !== 'function') {
     throw new TypeError('drainPending requires a CompletionStore.');
@@ -51,7 +52,7 @@ export async function drainPending({
       count: 0,
     };
   }
-  const text = renderer(completions, host);
+  const text = renderer(completions, host, context);
   await writeOutput(output, text);
   const ack = store.ackDelivery({ deliveryId, now });
   return {
