@@ -48,10 +48,11 @@ Bootstrap 只负责取得当前 workspace、lazy-start Server、转发请求和 
     ├── core/                 # Runtime、execution、completion、workspace、model
     ├── server/               # Unix socket Server、请求路由、生命周期、恢复
     ├── mcp/                  # stdio Bootstrap、工具注册、响应投影
-    ├── hook/                 # completion drain 与 Host 薄封装
-    ├── cli/                  # serve、mcp、hook、drain 命令
-    └── shared/               # 常量、错误、协议工具
-    plugins/                  # Host-specific MCP/Hook 注册
+    ├── hook/                 # completion drain 与 Host 薄封装（hosts/ 放各 Host 封装）
+    ├── install/              # Host 插件安装器（拷贝资源、本地化命令、注册 marketplace）
+    ├── cli/                  # serve、mcp、hook、drain、install 命令
+    └── shared/               # 常量、错误、协议工具、argv、Codex runtime 发现、日志
+    plugins/                  # Host 资源源文件（MCP/Hook 注册、manifest），唯一真源
     vendor/                   # Git Submodule
     tests/                    # unit、integration、e2e、fixtures
     docs/                     # 规格、计划、验收记录
@@ -59,9 +60,9 @@ Bootstrap 只负责取得当前 workspace、lazy-start Server、转发请求和 
 ## 运行环境与命令
 
 - Node.js >=24.0.0，使用 ESM。
-- 持久目录默认为 ~/.codex-as-subagent/，包含 config.toml（可选，对 Codex 配置的增量覆写，只含 Codex 键，见详细设计 6.3/6.4）、state.sqlite、Unix socket、锁和日志。
+- 持久目录默认为 ~/.codex-as-subagent/，包含 state.sqlite、Unix socket、锁和 server.log。`config.toml`（可选，对 Codex 配置的增量覆写，只含 Codex 键，见详细设计 6.3/6.4）**当前尚未实现读取**，属规划项。
 - Codex 自有认证、profile、transcript 仍位于 ~/.codex/，不复制到本项目数据库。
-- 默认 dedicated Codex profile：gpt-5.6-luna + xhigh。
+- 默认 dedicated Codex profile：gpt-5.6-luna + xhigh。Server 冷启动时按设计 6.4 自动发现 Codex app-server 运行时（`CODEX_BIN` env 优先），无需手工配置路径。
 
     npm install
     npm test
@@ -92,6 +93,14 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 
 Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP」：改 `plugins/<host>/` 源码 → `install --host=<host>` → 重启宿主 → 验证。
 
+## 已知限制（V1）
+
+- **共享 `~/.codex` 的跨客户端线程锁**：Codex app-server 对每个 thread 持有 flock 型写锁（`~/.codex/thread-writer-locks/<threadId>.lock`）。若同一账号下另有 Codex 客户端（如 ChatGPT 桌面版）同时运行并占用某线程，本项目的 `codex_send`/`codex_steer`/`codex_interrupt` 对该线程会失败（上游返回 "already has an active writer"）。本 Runtime Server 自己创建的线程由自己的 app-server 持锁，正常可用；换 Server 实例或桌面版接管旧线程时可能遇到。
+- **错误信息可能透传上游原文**：上游 `AppServerError` 自带 `code` 时会被直接透传给模型（如上述 writer 冲突）。计划收敛为稳定的领域错误码。
+- **`npm run lint` 只做单文件语法检查**（`node --check src/cli/main.mjs`），不覆盖全量源码，也无 ESLint 规则。
+- **`tests/e2e/` 与 `tests/fixtures/` 为空占位**；真实端到端目前靠 `docs/autonomous-runs/` 的手工验收路径。
+- **`config.toml` 增量覆写未实现**（无代码读取）。
+
 ## 开发测试闭环
 
 1. 先阅读详细设计、AGENTS.md 和 CLAUDE.md。
@@ -110,6 +119,7 @@ Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP�
 | docs/Codex As Subagent — 详细设计与编码规格.md | V1 权威设计与编码规格 |
 | docs/superpowers/plans/2026-09-11-codex-as-subagent-v1.md | 本轮实现计划、接口和测试任务 |
 | docs/autonomous-runs/ | 用户级验收快照与结果 |
+| docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md | 十工具真实 ZCode 会话 E2E、PostToolUse 中途回流与中断协议修复（2026-09-11） |
 | docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md | ZCode 插件真实路径验收：4 处缺陷修复与 Hook 回流打通（2026-09-11） |
 | docs/research/2026-09-11-codex-runtime-discovery.md | Codex 安装形态、认证共享与 app-server 协议外部调研（2026-09-11） |
 | docs/research/2026-09-11-zcode-hook-protocol.md | ZCode Hook/MCP/插件协议逆向取证调研（2026-09-11） |

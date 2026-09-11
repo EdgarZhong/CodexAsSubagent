@@ -103,3 +103,18 @@ NOTIF: {"method":"turn/completed","params":{"threadId":"...","turn":{"id":"...",
 
 结论：steer 内容**真实改变**了在途 turn 的输出，而非仅受理 ACK。
 
+## 8. 补充发现：跨客户端线程锁（V1 已知限制，未修复）
+
+向"上一 Server 实例创建、当前实例未持有"的线程调 `codex_send` 时报错：`{"code":"internal_error","message":"thread 01a08efb-da24-... already has an active writer"}`。
+
+取证：
+
+- `~/.codex/thread-writer-locks/<threadId>.lock` 是 **flock 型**锁（二进制含 `writer_lock.rs`、`failed to acquire thread writer lock`）。用 `fcntl.flock(LOCK_EX|LOCK_NB)` 探测该文件返回 `BlockingIOError`，证实锁确实被持有。
+- `lsof` 显示持有者是 **ChatGPT 桌面版的 app-server**（PID 63149，父进程 `/Applications/ChatGPT.app/Contents/MacOS/ChatGPT`），它同时持有 9 个历史线程的锁。
+- 对照：本 Server 自己新建的线程（`01a08f02-0109`）由本 Server 的 app-server 持有，`codex_send` 成功；Server idle 退出后该锁释放（`lsof` 无持有），而桌面版仍持有旧线程锁。
+
+结论：`~/.codex` 跨 Codex 客户端共享，线程写锁是跨客户端互斥的。V1 隔离边界是 workspace，不含"Codex 客户端独占"维度，故对旧线程的 send/steer/interrupt 在桌面版同时运行时可能失败。这是共享存储的固有限制。
+
+附带问题：`asDomainError` 只要有 `error.code` 就原样透传，导致上游 raw message 漏给模型、code 落为 `internal_error`。已在 CLAUDE.md 决策 18 记录修复计划。
+
+

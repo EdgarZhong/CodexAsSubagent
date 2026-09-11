@@ -37,7 +37,7 @@
 ## 测试与验收 SOP
 
 - 单元测试使用 Node 内置 test runner，运行：npm test。
-- 静态检查运行：npm run lint。
+- 静态检查运行：npm run lint（当前仅 `node --check` 单文件语法检查，非全量类型/规则检查；改动后不得据此宣称"静态检查通过"涵盖全仓）。
 - CLI/stdio/socket 基础回归运行：npm run smoke。
 - SQLite 并发场景必须验证 transaction 短、WAL/FULL/busy_timeout/foreign_keys 配置和 compare-and-set 状态转移。
 - 验收必须覆盖 spawn async、send/steer/interrupt、workspace 隔离、wait/wait_many、Hook claim/lease、crash recovery、lazy activation、idle shutdown、changed-files attribution 和 ZCode 插件骨架。
