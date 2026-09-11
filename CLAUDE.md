@@ -4,7 +4,7 @@
 
 - 目标：按 docs/Codex As Subagent — 详细设计与编码规格.md 自主交付尽可能完整的 V1，并形成可运行、可测试、可继续演进的 Git 仓库。
 - 阶段：Task 1-8 已完成；V1 验收完成；ZCode 插件协议已按真实 bundle 取证修复；真实 Codex app-server E2E（spawn/wait/status，gpt-5.6-luna 真实模型调用）已于 2026-09-11 通过，见 docs/autonomous-runs/20260911-1206-real-codex-e2e.md。插件已用标准 ZCode marketplace 方式装入本机并启用，MCP bootstrap 由 ZCode GUI 会话拉起（进程链 `node src/cli/main.mjs mcp` ← `zcode-cli` ← `zcode-host-local-1`）。2026-09-11 真实插件路径实测暴露并修复 4 处缺陷，Hook 回流端到端打通，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。
-- 下一步候选：真实 send/steer 成功路径（已验证 accepted ACK 与 steer 受理，未验证 steer 内容真实生效）；crash recovery 真实路径（已验证 recovery 对账落 failed 并回流）；config.toml 增量覆写实现（当前零代码读取）；插件命令在 GUI 子进程 PATH 中的可行性（开源一键安装需保证 `codex-as-subagent` 可被 Host 发现，或改用 `node` + 解析后的绝对路径，且 ZCode 插件 update 会从源目录重同步覆盖本地化 patch）；`doctor` 命令（设计 6.4 提及，未实现）；session 级隔离（V2，设计 6.2 末尾）。
+- 下一步候选：crash recovery 真实路径（已验证 recovery 对账落 failed 并回流）；config.toml 增量覆写实现（当前零代码读取）；插件命令在 GUI 子进程 PATH 中的可行性（开源一键安装需保证 `codex-as-subagent` 可被 Host 发现，或改用 `node` + 解析后的绝对路径，且 ZCode 插件 update 会从源目录重同步覆盖本地化 patch）；`doctor` 命令（设计 6.4 提及，未实现）；session 级隔离（V2，设计 6.2 末尾）。
 - 基线：2026-09-11，已完成 Git 分支、package manifest、CLI/共享常量、源码与测试目录骨架及 pinned Submodule。
 - 默认裁决：使用 Node.js ESM 与内置 node:sqlite；以 fake/in-memory Supervisor Adapter 支撑确定性单元测试，同时保留真实上游 Adapter 接口。
 

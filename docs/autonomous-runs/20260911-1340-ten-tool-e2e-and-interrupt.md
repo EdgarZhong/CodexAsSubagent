@@ -90,5 +90,16 @@ NOTIF: {"method":"turn/completed","params":{"threadId":"...","turn":{"id":"...",
 
 ## 6. 遗留
 
-- `codex_steer` 仅验证 `accepted:true` 受理，未验证 steer 内容真实改变输出（被中断打断）。
 - 未验证 `status=failed` 的真实 turn 路径（仅经 recovery 合成 failed 验证）。
+- `codex_wait` 与 Hook 双通道互斥已观察到两种结果：Hook 抢先时为 `no_active_turn`，本 turn 无后续工具调用时为 `codex_wait` 直接送达；两条路径均置 `delivered`，无重复消费。
+
+## 7. 补充验证：codex_steer 真实生效（13:41）
+
+起一个"从 1 数到 100000"的长输出线程，中途 `codex_steer` 要求改为只输出 `STEER-TOOK-EFFECT`：
+
+- `codex_steer` 返回 `{"threadId":"...","accepted":true,"status":"running"}`
+- `codex_wait` 返回 `{"status":"completed","finalAssistantMessage":"STEER-TOOK-EFFECT"}`
+- DB：`terminal_status=completed, delivery_state=delivered`，该结果由 `codex_wait` 直接送达（direct 通道）
+
+结论：steer 内容**真实改变**了在途 turn 的输出，而非仅受理 ACK。
+
