@@ -7,12 +7,14 @@ import { serve } from './serve.mjs';
 import { mcp } from './mcp.mjs';
 import { hook } from './hook.mjs';
 import { drain } from './drain.mjs';
+import { install } from './install.mjs';
 
 const commands = [
   ['serve', '启动 Runtime Server'],
   ['mcp', '启动 MCP stdio Bootstrap'],
   ['hook', '运行 Host Hook wrapper'],
-  ['drain', '读取并交付待处理 completion']
+  ['drain', '读取并交付待处理 completion'],
+  ['install', '把 Host 插件安装到本机插件缓存']
 ];
 
 function rootHelp() {
@@ -65,6 +67,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (command === 'mcp') return await mcp(argv.slice(1));
   if (command === 'hook') return await hook(argv.slice(1));
   if (command === 'drain') return await drain(argv.slice(1));
+  if (command === 'install') return await install(argv.slice(1));
 
   console.error(`未知命令: ${command}`);
   console.error('运行 codex-as-subagent --help 查看帮助。');

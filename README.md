@@ -83,7 +83,12 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 
 `codex-as-subagent hook --host=<host>` 从当前 canonical workspace 的 SQLite completion buffer 原子 claim pending completion，渲染后 ACK；`codex-as-subagent drain` 提供宿主无关的 plain 输出。Hook 不启动、恢复或中断 Codex thread。`--host` 同时接受 `--host=zcode` 与 `--host zcode` 两种写法。
 
-`plugins/zcode/` 注册 ZCode 插件：`.mcp.json` 提供十个 MCP 工具，`hooks/hooks.json` 在 `UserPromptSubmit`、`PostToolUse`（匹配所有工具）与 `Stop` 触发 `codex-as-subagent hook --host=zcode`——PostToolUse 负责 turn 进行中即时回流，UserPromptSubmit 负责跨 turn 兜底，Stop 负责 turn 结束窗口。安装说明见 [plugins/zcode/README.md](plugins/zcode/README.md)。该插件已按标准 marketplace 方式装入本机 ZCode 并完成真实路径验证，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。
+`plugins/zcode/` 注册 ZCode 插件：`.mcp.json` 提供十个 MCP 工具，`hooks/hooks.json` 在 `UserPromptSubmit`、`PostToolUse`（匹配所有工具）与 `Stop` 触发 `codex-as-subagent hook --host=zcode`——PostToolUse 负责 turn 进行中即时回流，UserPromptSubmit 负责跨 turn 兜底，Stop 负责 turn 结束窗口。该插件已按标准 marketplace 方式装入本机 ZCode 并完成真实路径验证，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。
+
+安装提供两种并存方式：
+
+- **方式 A（ZCode GUI 标准路径）**：确保 `codex-as-subagent` 落在 GUI 子进程 PATH 中（如 `npm install -g .`），再用 ZCode 的 Discover 标签页添加本仓库为 marketplace 并 Install。详见 [plugins/zcode/README.md](plugins/zcode/README.md)。
+- **方式 B（CLI 一键）**：`codex-as-subagent install --host=zcode`，把插件拷贝进 ZCode 缓存、本地化为绝对路径命令、注册 marketplace 并启用；支持 `--dry-run`。
 
 ## 开发测试闭环
 

@@ -51,6 +51,11 @@
     - `Stop`：仅覆盖"最后一次工具调用之后、turn 结束之前"落地的窄窗口，以 `decision:block` 续轮送达。**不添加 `stop_hook_active` 护栏**：claim→ack 会在 block 的同一瞬间清除 pending，产生 block 的前提自动消失，构造上无法套娃；naive 加护栏反而会掐掉合法投递。机制澄清：hook 从不等待子 agent（那是 `codex_wait` 的职责），也不阻塞 turn。
     - 不再新增 Hook 事件的理由：`PreToolUse`/`PermissionRequest`/`PostToolUseFailure` 无回流语义；`SessionStart` 时机过早。会话 idle 期间子 agent 完成只能等下次 `UserPromptSubmit`，这是 Host 事件驱动的硬限制，与 ZCode 内置 mailbox 一致，配套解法是用户挂 Goal 保持主会话存活 + 模型用 `codex_wait`。
     - 双通道无重复消费：`claimPendingHook` 只取 `delivery_state='pending'`，`codex_wait` 走 direct 投递置为 `claimed_direct→delivered`，两条路径互斥。
+16. ZCode 插件安装形态与 CLI 安装器（2026-09-11，用户拍板"两种并存"）。取证结论：
+    - **ZCode 无脚本化 install 命令**：`zcode plugins` 仅 `list|enable|disable|uninstall`（逐个试探 `install`/`add`/`remove` 均返回 Unknown）。官方生命周期是 GUI：Settings → Plugin Management → Discover 的 `+` 添加 marketplace（接受 GitHub/Git URL/本地目录/文件），再 Install/Enable。**我们的二进制不应承担"反向安装自己"的职责**，故 CLI 安装是便捷通道而非官方机制。
+    - **PATH 结论修正（推翻此前判断）**：此前据 `launchctl getenv PATH` 为空断言"GUI 子进程 PATH 不可信"。实测 GUI 传给 MCP 子进程的 PATH 很丰富（含 `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin`、nvm node bin 等）。故裸命令 `codex-as-subagent` 只要装进其中任一目录（`npm install -g .` 或软链）即可被解析；此前结论是基于错误探针的误判。
+    - **两种安装方式并存**：方式 A 走 ZCode GUI 标准路径（插件保持裸命令，要求命令在 PATH 中；社区分发推荐）。方式 B 为新增 `codex-as-subagent install --host=zcode`（`src/install/zcode-plugin.mjs` + `src/cli/install.mjs`）：拷贝插件到 `~/.zcode/cli/plugins/cache/<marketplace>/<name>/<version>`，把 `.mcp.json`/`hooks/hooks.json` 命令本地化为 `process.execPath` + CLI 绝对路径（**不依赖 PATH**），探测 Codex 运行时写入 `CODEX_BIN` 与 `CODEX_APP_SERVER_ARGS`，注册 marketplace/安装记录并启用；覆盖前各留 `.bak-cas` 备份；支持 `--dry-run`/`--portable`/`--zcode-root`；幂等且不破坏其它插件状态。
+    - 已用方式 B 对真实 ZCode 根实装并验证：`zcode plugins list` 显示 `hooks: 3`，缓存三事件齐全，4 个既有插件状态完好。回归 97/97。
 
 ## 执行边界
 
