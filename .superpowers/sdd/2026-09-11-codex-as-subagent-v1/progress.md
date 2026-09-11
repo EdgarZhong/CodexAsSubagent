@@ -37,7 +37,7 @@
 - Task 6: complete (focused 8/8, full 71/71, CLI JSON-RPC smoke passed; report task-6-report.md)
 - Task 6: complete (direct implementation; no subagent handoff)
 - Task 7: complete (direct implementation; no subagent handoff)
-- Task 8: pending
+- Task 8: complete (79/79 full regression, final self-review, CLI smoke and acceptance record)
 
 ## Review ledger
 
@@ -60,3 +60,4 @@
 - Task 4: complete (commit 955d810, focused 12/12 and full 59/59; implementation self-review found and fixed fast terminal-event race and batch ACK binding).
 - Task 5: complete (commit 1d875d8, focused 6/6 and full 65/65; Unix socket, Bootstrap ACK, startup lock, lifecycle and recovery tests passed).
 - Task 7: complete (focused 8/8, full 79/79, Hook/Drain CLI smoke passed; report task-7-report.md).
+- Task 8: complete (fresh 79/79, lint/smoke/source syntax/diff checks passed; acceptance record `docs/autonomous-runs/20260911-0926-codex-as-subagent-v1.md`; real Codex/ZCode E2E limits recorded).

@@ -3,7 +3,7 @@
 ## 当前阶段
 
 - 目标：按 docs/Codex As Subagent — 详细设计与编码规格.md 自主交付尽可能完整的 V1，并形成可运行、可测试、可继续演进的 Git 仓库。
-- 阶段：Task 1-7 已完成；当前进入最终回归、Review 和用户级验收阶段。
+- 阶段：Task 1-8 已完成；本轮 V1 验收完成，真实 Codex/ZCode 外部 E2E 限制已记录。
 - 基线：2026-09-11，已完成 Git 分支、package manifest、CLI/共享常量、源码与测试目录骨架及 pinned Submodule。
 - 默认裁决：使用 Node.js ESM 与内置 node:sqlite；以 fake/in-memory Supervisor Adapter 支撑确定性单元测试，同时保留真实上游 Adapter 接口。
 
@@ -18,7 +18,7 @@
 - [x] 实现 Unix Socket Runtime Server、stdio Bootstrap、lazy start、startup lock、idle shutdown 与 recovery。
 - [x] 注册并实现十个 MCP 工具的稳定 schema 与 compact response projection，并接通 MCP JSON-RPC stdio façade。
 - [x] 实现 Hook drain、lease 恢复和 Host wrapper；补齐 ZCode 插件配置。
-- [ ] 完成 unit/integration/smoke 回归、独立 Review 和用户级验收记录（Task 8，当前阶段）。
+- [x] 完成 unit/integration/smoke 回归、主 Agent 需求审查和用户级验收记录；真实外部 E2E 限制已明确记录。
 - [x] 自主执行 git commit；不执行 push、发布或跨工作区合并。
 
 ## 当前动态决策
@@ -29,6 +29,7 @@
 4. 不确定项处理：详细设计没有锁定上游具体 commit、Host Hook stdin/additionalContext 协议细节、Codex app-server 当前 wire schema 和 dedicated profile 安装方式；本轮先提供可替换 Adapter、Host wrapper 配置和明确错误边界，并在最终报告列出待确认项。
 5. MCP façade：使用最小 JSON-lines JSON-RPC 实现 `initialize`、`tools/list`、`tools/call`、`ping` 和通知；业务错误以 `isError` content 返回，协议级未知方法保持 JSON-RPC 错误；Bootstrap 不持有 Runtime/SQLite 业务状态。
 6. Hook wrapper：各 Host 只在 `src/hook/hosts/` 做可替换文本 envelope；由于规格没有锁定外部 Host wire schema，真实 ZCode 协议兼容性列入 Task 8 外部验收风险，不伪称已完成。
+7. 最终验收：本地确定性路径以 79/79 全量测试、lint、smoke、源码语法和 diff check 为证据；真实 Codex app-server、Host 断开和 ZCode E2E 未在缺少可验证外部会话时伪造通过，详情见 `docs/autonomous-runs/20260911-0926-codex-as-subagent-v1.md`。
 
 ## 执行边界
 
