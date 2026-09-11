@@ -3,7 +3,8 @@
 ## 当前阶段
 
 - 目标：按 docs/Codex As Subagent — 详细设计与编码规格.md 自主交付尽可能完整的 V1，并形成可运行、可测试、可继续演进的 Git 仓库。
-- 阶段：Task 1-8 已完成；本轮 V1 验收完成，真实 Codex/ZCode 外部 E2E 限制已记录。
+- 阶段：Task 1-8 已完成；V1 验收完成；ZCode 插件协议已按真实 bundle 取证修复；真实 Codex app-server E2E（spawn/wait/status，gpt-5.6-luna 真实模型调用）已于 2026-09-11 通过，见 docs/autonomous-runs/20260911-1206-real-codex-e2e.md。
+- 下一步候选：ZCode 插件运行态实证（安装插件 + 真实 Hook 回流）；Runtime 自动发现/probe 模块实现（设计 6.4 已定稿）；真实 send/steer/interrupt 与 crash recovery 路径；session 级隔离（V2，设计 6.2 末尾）。
 - 基线：2026-09-11，已完成 Git 分支、package manifest、CLI/共享常量、源码与测试目录骨架及 pinned Submodule。
 - 默认裁决：使用 Node.js ESM 与内置 node:sqlite；以 fake/in-memory Supervisor Adapter 支撑确定性单元测试，同时保留真实上游 Adapter 接口。
 
