@@ -6,7 +6,6 @@ export const ERROR_CODES = Object.freeze({
   INVALID_MODEL: 'invalid_model',
   INVALID_TERMINAL_RESULT: 'invalid_terminal_result',
   INVALID_TERMINAL_STATUS: 'invalid_terminal_status',
-  MULTIPLE_ACTIVE_HOST_SERVERS: 'multiple_active_host_servers',
   NO_ACTIVE_TURN: 'no_active_turn',
   SESSION_CONFLICT: 'session_conflict',
   SESSION_NOT_ESTABLISHED: 'session_not_established',

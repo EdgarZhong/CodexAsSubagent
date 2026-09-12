@@ -257,11 +257,6 @@ export class CompletionRouter {
       : storesFrom({ executions: options, completions: completionStore });
     this.completions = stores.completions;
     this.executions = stores.executions;
-    // V2 事件驱动 Web delivery（适配说明 §四）：经构造参数注入，缺省 undefined
-    // 表示不启用，保持纯 store 路径可测。
-    const extras = single && isRecord(options) && !Array.isArray(options) ? options : {};
-    this.webDelivery = extras.webDelivery ?? null;
-    this.logger = extras.logger ?? null;
   }
 
   onTerminal(event = {}) {
@@ -343,40 +338,7 @@ export class CompletionRouter {
       status,
       terminalResult: safeTerminalResult,
     });
-    this.#attemptWebDelivery(completion);
     return completion;
-  }
-
-  // V2 事件驱动 Web delivery（适配说明 §四）：Mailbox durable COMMIT（
-  // insertCompletionFirst 事务）成功之后，对本次新落库、仍为 pending 且
-  // host=kimi-code 的 completion fire-and-forget 触发。不得 await——不得阻塞
-  // terminal 响应，也不改变 idle 判定语义；投递失败由 web-delivery 内部记录
-  // 到 server.log，进程异常靠 delivery lease 过期回退。
-  #attemptWebDelivery(completion) {
-    const delivery = this.webDelivery;
-    if (!delivery || typeof delivery.attemptWebDelivery !== 'function') return;
-    if (!isRecord(completion) || completion.inserted === false) return;
-    if (completion.host !== 'kimi-code' || completion.deliveryState !== 'pending') return;
-    let promise;
-    try {
-      promise = delivery.attemptWebDelivery({ completion });
-    } catch (error) {
-      this.#logWebDeliveryFailure(error);
-      return;
-    }
-    if (promise && typeof promise.catch === 'function') {
-      promise.catch((error) => this.#logWebDeliveryFailure(error));
-    }
-  }
-
-  #logWebDeliveryFailure(error) {
-    try {
-      this.logger?.warn?.('completion.web_delivery.unhandled_failure', {
-        error: error?.message ?? String(error),
-      });
-    } catch {
-      // 日志失败不得影响 terminal 路径。
-    }
   }
 }
 

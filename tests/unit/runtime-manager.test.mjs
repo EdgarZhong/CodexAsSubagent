@@ -188,7 +188,7 @@ test('RuntimeManager.spawn returns an immediate public ACK and persists model/ef
     startedAt: ack.startedAt,
   });
   assert.equal('turnId' in ack, false);
-  assert.equal('deliveryId' in ack, false);
+  assert.equal('claimId' in ack, false);
   assert.match(ack.startedAt, /^\d{4}-\d{2}-\d{2}T/);
   const execution = harness.executionOf('thread-1');
   assert.equal(execution.model, 'gpt-5.6-luna');
@@ -201,7 +201,7 @@ test('RuntimeManager.spawn returns an immediate public ACK and persists model/ef
   assert.equal(hold.holderHost, HOST);
   assert.equal(hold.workspace, harness.workspace);
   assert.deepEqual(harness.calls.map(([name]) => name), ['startThread', 'startTurn']);
-  assert.doesNotMatch(json(ack), /turnId|deliveryId|workspace/);
+  assert.doesNotMatch(json(ack), /turnId|claimId|workspace/);
 });
 
 test('runtime requests fail closed with session_not_established before any CAS state change', async (t) => {
@@ -572,12 +572,12 @@ test('terminal before wait is claimed through CompletionRouter and ACKed explici
     },
     error: null,
   });
-  assert.doesNotMatch(json(result), /turnId|deliveryId/);
+  assert.doesNotMatch(json(result), /turnId|claimId/);
   const completion = harness.completions.listCompletions({ host: HOST })[0];
-  assert.equal(completion.deliveryState, 'claimed_direct');
+  assert.equal(completion.deliveryState, 'claimed_waiter');
   assert.equal(completion.host, HOST);
   assert.equal(completion.sessionId, SESSION);
-  assert.equal(await harness.runtime.ackDelivery(result, HOST), true);
+  assert.equal(await harness.runtime.ackClaim(harness.runtime.claimIdFor(result), HOST), true);
   assert.equal(harness.completions.getCompletion(completion.completionId).deliveryState, 'delivered');
 });
 
@@ -586,7 +586,7 @@ test('wait reserves before terminal, wakes from durable completion, and does not
   const ack = await spawn(harness);
   const waiting = harness.runtime.wait(harness.ctx, ack.threadId);
   await new Promise((resolve) => setTimeout(resolve, 2));
-  assert.equal(harness.executionOf(ack.threadId).reservationKind, 'direct');
+  assert.equal(harness.executionOf(ack.threadId).reservationKind, 'waiter');
 
   harness.emit({
     type: 'turn/interrupted',
@@ -597,8 +597,8 @@ test('wait reserves before terminal, wakes from durable completion, and does not
   const result = await waiting;
   assert.equal(result.toJSON().status, 'interrupted');
   assert.equal(harness.calls.filter(([name]) => name === 'interruptTurn').length, 0);
-  assert.equal(harness.completions.listCompletions({ host: HOST })[0].deliveryState, 'claimed_direct');
-  await harness.runtime.ackDelivery(result, HOST);
+  assert.equal(harness.completions.listCompletions({ host: HOST })[0].deliveryState, 'claimed_waiter');
+  await harness.runtime.ackClaim(harness.runtime.claimIdFor(result), HOST);
   assert.equal(harness.completions.listCompletions({ host: HOST })[0].deliveryState, 'delivered');
 
   const second = await harness.runtime.send(harness.ctx, { threadId: ack.threadId, prompt: 'again' });

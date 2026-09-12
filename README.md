@@ -33,8 +33,8 @@ Bootstrap 只负责 Host 身份（`--host`）、workspace canonicalization、Pre
 - **Host 是产品类型**（`kimi-code`、`zcode`、…），由 Host integration 静态指定，不从 cwd/session/进程名/工具参数推断；同一产品的多个 CLI 进程 = 同一 Host 的多个 Session。
 - 隔离命名空间：`Execution/Completion` 在创建时固化不可变 provenance `(host, workspace, session_id)`；Thread 只有临时 Host Hold（`thread_holds` + `host_presence` lease，spawn/send 取得，stale 可 lazy takeover）。
 - Weak Host 的 MCP 请求 session-blind：session 身份由 `PreToolUse` Session Gate 写入持久化 `current_sessions(host, workspace)`，MCP 请求按其归属；无 `current_session` 时 fail closed `session_not_established`（下一次合法 PreToolUse 后自恢复）。
-- 所有 completion claim（Hook / Direct Wait / Web delivery）使用完整 `(host, workspace, session_id, delivery_state='pending')` 谓词，workspace-only 盲领被结构性排除。
-- Kimi TUI 与 Web 统一 `host = kimi-code`；Web 回流是 Runtime 内部事件驱动 delivery（terminal COMMIT → claim → Kimi Server API → ACK/NACK/lease），无常驻 worker。
+- 所有 completion claim（Hook / waiter）使用完整 `(host, workspace, session_id, delivery_state='pending')` 谓词，workspace-only 盲领被结构性排除；claim 以 `delivery_state + claim_id` 定界，每次重新 claim 生成新 claim 代际。
+- Kimi TUI 与 Web 统一 `host = kimi-code`；当前 V2 的唯一主动 Mailbox delivery transport 是 Hook，Terminal Initiate 按 waiter reservation 选择两个 Initial Transaction 分支（出生即 `claimed_waiter` 或 `pending`）。
 
 ## 稳定接口与实现入口
 
@@ -104,7 +104,7 @@ codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500
 
 `codex-as-subagent hook --host=<host>` 经 Host Adapter 解析 native session identity 后，按完整 `(host, workspace, session_id)` 原子 claim pending completion，渲染后 ACK；Hook 缺必要 session 字段时拒绝 claim（不 fallback）。Kimi TUI 的 `PreToolUse` 承担双重职责且顺序固定：先 Mailbox 回流（claim 自己 session 的 pending → veto 工具 → 注入），无 pending 时才对 CAS MCP 工具执行 Session Gate（他人 active Execution → veto；空闲 → 原子接管）。`Stop`/`UserPromptSubmit` 只承担 Mailbox delivery。Hook 不启动、恢复或中断 Codex thread。
 
-`plugins/kimi-code/` 同时服务 Kimi TUI 与 Web（统一 `--host=kimi-code`）：TUI 走 Hook 回流；Web completion 由 Runtime 在 terminal 落库后事件驱动投递到 Kimi Server API `/sessions/{session_id}/...`（0 active Server 不投递保持 pending；>1 报 `multiple_active_host_servers`），投递使用 `{code,msg,data}` envelope、`content` text block 与固定 K2.7 模型 `kimi-code/kimi-for-coding`。CLI 安装命令为 `codex-as-subagent install --host=kimi-code`，支持 `--dry-run --kimi-code-home <path>`；MCP server 由安装器注册到用户级 `$KIMI_CODE_HOME/mcp.json`（宿主以 workspace cwd 拉起用户级 stdio MCP；插件 manifest 携带 MCP 会以插件目录为 cwd，禁止使用）。安装后执行 `/reload` 或新开 Kimi session。
+`plugins/kimi-code/` 服务 Kimi TUI 与 Web（统一 `--host=kimi-code`）：主动回流经 Host Hook（`PreToolUse`/`Stop`/`UserPromptSubmit`）注入；Hook 静态安装，是否投递由 Mailbox 数据决定，不动态装卸 Hook。CLI 安装命令为 `codex-as-subagent install --host=kimi-code`，支持 `--dry-run --kimi-code-home <path>`；MCP server 由安装器注册到用户级 `$KIMI_CODE_HOME/mcp.json`（宿主以 workspace cwd 拉起用户级 stdio MCP；插件 manifest 携带 MCP 会以插件目录为 cwd，禁止使用）。安装后执行 `/reload` 或新开 Kimi session。
 
 `plugins/zcode/` 注册 ZCode 插件：`.mcp.json` 提供十个 MCP 工具，`hooks/hooks.json` 在 `UserPromptSubmit`、`PostToolUse`（匹配所有工具）与 `Stop` 触发 `codex-as-subagent hook --host=zcode`。**注意（2026-09-12）**：V2 核心已合入，但 ZCode 插件资源升级与真实 E2E 推后到单独一轮，现有 ZCode 安装在 V2 协议下暂不可用（`mcp` 现要求 `--host`）。
 
@@ -128,7 +128,7 @@ Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP�
 
 **明确不做**
 
-- 不做多 Server 路由（Server 型 Host 假设至多一个 active Server；>1 → `multiple_active_host_servers` fail closed）。
+- 不做多 Server 路由，也不保留 Web transport 错误面（Server 型 Host 单 active Server 为环境假设；同一 `(host, workspace, session_id)` 单活跃 interactive instance 为产品约束）。
 - 不做 V1→V2 数据迁移与旧状态保留（破坏性重建是完整升级契约）。
 - 不做线程锁探测；不新增 Hook 事件；MCP public API 不增加 cwd/workspace/sandbox/approval/event cursor/raw event/generic Codex config 编辑能力。
 

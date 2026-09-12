@@ -342,59 +342,37 @@ PreToolUse(CAS MCP tool)
 
 ---
 
-# 四、Kimi Web模式集成
+# 四、Kimi Web 模式（当前 V2 不实现）
 
-Kimi Server API 本身已经提供 Session-addressed API。
+**收口状态（2026-09-12）**：当前 V2 的唯一主动 Mailbox delivery transport 是 **Hook**。Web Push 不进入当前版本；未来若重新加入，按届时设计重新实现，不以任何旧实现为地基。
 
-Prompt 和 steer 都直接通过：
+已经废除、不得恢复或以任何变体重新引入的 Web 主动回流实现：
+
+```text
+kimi-web CLI（--attach/--detach/--worker）
+worker registry（JSON registry）
+周期轮询 Mailbox
+kimi-code-web host 值
+Runtime 内部事件驱动 Web delivery
+（上一轮按旧裁决实现的 terminal → claim → Kimi Server API 链路，
+  本轮连同 src/core/web-delivery.mjs / src/core/kimi-web-client.mjs 一并删除）
+```
+
+正式 CLI 入口固定为 `serve` / `mcp` / `hook` / `drain`，不得把 Web 回流暴露为新的公开 CLI 控制面。
+
+以下小节是历轮讨论已经确定、未来重做 Web transport 时直接沿用的**设计原则与协议事实**；其对应机制当前不存在于代码中。
+
+### 1. Session-addressed 寻址原则
+
+Kimi Server API 本身已经提供 Session-addressed API，Prompt 和 steer 都直接通过：
 
 ```text
 /api/v1/sessions/{session_id}/...
 ```
 
-寻址具体 Kimi Session。
+寻址具体 Kimi Session。因此 Mailbox 中固化的 `session_id` 可以直接作为目标 Session ID，无需 CAS 维护第二套 Web Session mapping。
 
-因此 Mailbox 中固化的：
-
-```text
-session_id
-```
-
-可以直接作为 Kimi Server API 的目标 Session ID。
-
-无需 CAS 维护第二套 Web Session mapping。
-
-整体链路为：
-
-```text
-Execution A terminal
-        ↓
-Mailbox {
-    session_id = A
-    delivery_state = pending
-}
-        ↓
-主动投递器 claim session=A
-        ↓
-Kimi Server API
-/sessions/A/...
-        ↓
-Session A
-```
-
-这一链路不读取 Runtime 的：
-
-```text
-current_session
-```
-
-因此即使当前 CAS 使用权已经切换给 B：
-
-```text
-current_session = B
-```
-
-A 的历史 Completion 仍然会根据 Mailbox 的静态 `session_id=A` 被送回 A。
+该链路不读取 Runtime 的 `current_session`：即使 CAS 使用权已切换给 B，A 的历史 Completion 仍然根据 Mailbox 的静态 `session_id=A` 被送回 A。
 
 ---
 
@@ -430,9 +408,9 @@ Mailbox.session_id
 
 ---
 
-## 2. 不再使用 Workspace 盲领
+### 2. 完整 claim 谓词原则（不 Workspace 盲领）
 
-Web 主动投递器必须使用完整 claim 条件：
+未来任何 Web 主动投递器都必须使用完整 claim 条件：
 
 ```text
 host = kimi-code
@@ -460,80 +438,21 @@ session_id
 
 ---
 
-## 3. 回归事件驱动：Runtime 内部 Delivery
-
-上一版 Kimi Web 实现采用：
-
-```text
-detached worker
-+
-周期轮询 Mailbox
-```
-
-并因此出现孤儿 worker 和 Host 生命周期脱节。`kimi-web --attach/--detach/--worker`、worker registry、`kimi-code-web` host 值与轮询架构全部废除，不得恢复或以任何变体重新引入；也不得把 Web 回流暴露为新的公开 CLI 控制面——正式入口固定为 `serve` / `mcp` / `hook` / `drain`。
-
-V2 的 Web 主动回流是 **Runtime 内部事件驱动 delivery**：
-
-```text
-Codex terminal
-↓
-Runtime Server
-↓
-BEGIN
-    INSERT Completion / Mailbox
-    remove / terminalize Execution
-COMMIT
-↓
-Completion 若仍为 pending
-↓
-原子 claim（pending → claimed_hook）
-↓
-Kimi Server API /sessions/{completion.session_id}/...
-↓
-成功：ACK → delivered
-确定失败：NACK → pending
-进程异常：delivery lease expiry → pending
-```
-
-两条硬性约束：
+### 3. durable-first 与单消费者原则
 
 ```text
 Mailbox durable COMMIT
 BEFORE
-任何外部 Web API side effect
+任何外部 side effect
 ```
 
-以及：terminal 时 Completion 已因 Direct Wait reservation 成为 `claimed_direct` 的，Web proactive path 不得再次发送。
-
-主动投递失败不会丢失 Completion；记录仍保留在 Mailbox，按 Delivery Lease / ACK 机制恢复。除异常恢复外不得引入常驻轮询。
-
-### Kimi Server 路由与单 active Server 假设
-
-本轮不建立 Session → ServerInstance 映射。对 Server 型 `kimi-code`：
-
-```text
-0 active Server
-→ 不执行 Web proactive delivery
-→ Completion 保持 / 恢复 pending
-→ 仍可通过 Direct Wait 与 TUI Hook delivery 消费
-
-exactly 1 active Server
-→ 允许通过该唯一 Server 按
-  /sessions/{completion.session_id}/...
-  向 Completion 自己的 Session 投递
-
->1 active Server
-→ multiple_active_host_servers
-→ 不发送，fail closed
-```
-
-尤其不能把"某 Server 能读取这个 Session"当作多 Server 环境中的目标选择算法。V2 不是解决 Multi-Server Routing，而是通过产品环境假设明确不支持它。
+以及：每条 Completion 在任意时刻只能被一个消费者拥有（统一竞争 `pending → claimed_x`，claim 以 `delivery_state + claim_id` 定界）。投递失败不丢失 Completion，记录保留在 Mailbox，按 claim 层恢复机制回到 pending（见架构设计 §九）。除异常恢复外不得引入常驻轮询。
 
 ---
 
 # 五、最终 Kimi 适配结构
 
-Kimi TUI 与 Web 使用相同的 Mailbox Session Identity，但采用不同的消费入口。
+Kimi TUI 与 Web 使用相同的 Mailbox Session Identity；当前 V2 只有 TUI Hook 消费入口。
 
 ### TUI
 
@@ -557,20 +476,9 @@ CAS Session Gate
 → 次级
 ```
 
-### Web
+### Web（当前无消费入口）
 
-```text
-Mailbox(session=A)
-        ↓
-claimed_hook
-        ↓
-Kimi Server API
-/sessions/A/...
-        ↓
-Session A
-```
-
-Web 投递不经过 Runtime `current_session`，并且与控制面状态完全解耦——任何 Web routing / delivery 逻辑：
+当前 V2 不存在 Web 投递路径。未来重做 Web transport 时必须保持与控制面状态完全解耦——任何 Web routing / delivery 逻辑：
 
 ```text
 不得建立 current_session

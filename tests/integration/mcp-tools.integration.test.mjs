@@ -49,7 +49,7 @@ test('MCP tools/call maps all ten tools, validates arguments, projects responses
       threadId: 'thread-1',
       status: request.method === 'runtime.wait' ? 'completed' : 'running',
       turnId: 'turn-hidden',
-      deliveryId: 'delivery-hidden',
+      claimId: 'delivery-hidden',
       workspace: '/private/workspace',
     };
     return {
@@ -58,7 +58,7 @@ test('MCP tools/call maps all ten tools, validates arguments, projects responses
         ? { default: { id: 'gpt-5.6-luna', effort: 'xhigh' }, models: [{ id: 'gpt-5.6-luna' }] }
         : result,
       ...(request.method === 'runtime.wait' || request.method === 'runtime.wait_many'
-        ? { deliveryId: 'delivery-1' }
+        ? { claimId: 'delivery-1' }
         : {}),
     };
   });
@@ -84,7 +84,7 @@ test('MCP tools/call maps all ten tools, validates arguments, projects responses
     const body = JSON.parse(response.result.content[0].text);
     assert.equal(body.threadId ?? body.default?.id ?? body.models?.[0]?.id, body.threadId ? 'thread-1' : body.default?.id ?? 'gpt-5.6-luna');
     assert.equal(Object.hasOwn(body, 'turnId'), false, name);
-    assert.equal(Object.hasOwn(body, 'deliveryId'), false, name);
+    assert.equal(Object.hasOwn(body, 'claimId'), false, name);
     assert.equal(Object.hasOwn(body, 'workspace'), false, name);
     const forwarded = calls.find((entry) => entry.request.method === method && entry.request.id === index + 10);
     assert.deepEqual(forwarded?.context, context);

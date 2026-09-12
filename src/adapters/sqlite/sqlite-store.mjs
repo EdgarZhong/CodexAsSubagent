@@ -7,17 +7,20 @@ import { DatabaseSync } from 'node:sqlite';
 import { PRESENCE_LEASE_MS } from '../../shared/constants.mjs';
 import { normalizeTerminalStatus, safeError, summarizeChangedFiles, truncateAssistantMessage } from '../../shared/protocol.mjs';
 
+// Completion 消费状态机（收口后仅四态）：pending= durable 但无人拥有消费权；
+// claimed_waiter= 消费权由 waiter 持有（不论 reservation 建立于 terminal 前后）；
+// claimed_hook= 某次 Hook invocation 已获得消费权；delivered= 已确认完成消费。
 export const DELIVERY_STATES = Object.freeze([
   'pending',
-  'claimed_direct',
+  'claimed_waiter',
   'claimed_hook',
   'delivered',
 ]);
 
-export const DEFAULT_DELIVERY_LEASE_MS = 30_000;
+export const DEFAULT_CLAIM_LEASE_MS = 30_000;
 export const DEFAULT_DATA_DIR = join(homedir(), '.codex-as-subagent');
 
-const DELIVERY_STATE_SQL = "'pending', 'claimed_direct', 'claimed_hook', 'delivered'";
+const DELIVERY_STATE_SQL = "'pending', 'claimed_waiter', 'claimed_hook', 'delivered'";
 const TERMINAL_STATUS_SQL = "'completed', 'failed', 'interrupted'";
 
 // 全部 CAS 表。检测到旧 V1 schema 时按规格 §2.11 整体 DROP 后按 V2 重建，不做任何数据迁移。
@@ -51,7 +54,7 @@ const V2_SCHEMA_SQL = `
     reservation_kind TEXT,
     reservation_created_at TEXT,
     PRIMARY KEY (thread_id, turn_id),
-    CHECK (reservation_kind IS NULL OR reservation_kind = 'direct')
+    CHECK (reservation_kind IS NULL OR reservation_kind = 'waiter')
   );
 
   CREATE INDEX IF NOT EXISTS executions_scope_idx
@@ -67,8 +70,8 @@ const V2_SCHEMA_SQL = `
     terminal_status TEXT NOT NULL CHECK (terminal_status IN (${TERMINAL_STATUS_SQL})),
     payload_json TEXT NOT NULL,
     delivery_state TEXT NOT NULL CHECK (delivery_state IN (${DELIVERY_STATE_SQL})),
-    delivery_id TEXT,
-    delivery_started_at TEXT,
+    claim_id TEXT,
+    claimed_at TEXT,
     delivered_at TEXT,
     created_at TEXT NOT NULL,
     UNIQUE (thread_id, turn_id)
@@ -163,6 +166,19 @@ function presenceLeaseMs(value) {
   return lease;
 }
 
+function claimLeaseMs(value) {
+  const lease = value ?? DEFAULT_CLAIM_LEASE_MS;
+  if (!Number.isSafeInteger(lease) || lease < 0) {
+    throw new TypeError('leaseMs must be a non-negative integer.');
+  }
+  return lease;
+}
+
+function claimCutoff(leaseMs, now) {
+  const lease = claimLeaseMs(leaseMs);
+  return new Date(Date.parse(now) - lease).toISOString();
+}
+
 function changedFiles(value) {
   return summarizeChangedFiles(value?.files);
 }
@@ -243,8 +259,8 @@ function completionFromRow(row) {
     terminalStatus: row.terminal_status,
     payload,
     deliveryState: row.delivery_state,
-    deliveryId: row.delivery_id,
-    deliveryStartedAt: row.delivery_started_at,
+    claimId: row.claim_id,
+    claimedAt: row.claimed_at,
     deliveredAt: row.delivered_at,
     createdAt: row.created_at,
   };
@@ -280,8 +296,9 @@ function tableNames(db) {
   );
 }
 
-// V1 → V2 不做迁移（规格 §2.11）：schema_version 缺失/小于 2，或 executions/completions
-// 缺少 host 列，即判定为旧 schema，需要整体废弃重建。全新空库直接按 V2 建立。
+// V1 → V2 不做迁移（规格 §2.11）：schema_version 缺失/小于 2、executions/completions
+// 缺少 host 列、或 completions 缺少 claim_id 列（收口前的中间 V2 dev schema），
+// 即判定为旧 schema，需要整体废弃重建。全新空库直接按当前 V2 建立。
 function requiresV2Rebuild(db) {
   const tables = tableNames(db);
   if (!tables.has('meta') && !tables.has('executions') && !tables.has('completions')) {
@@ -295,11 +312,13 @@ function requiresV2Rebuild(db) {
     version = null;
   }
   if (version !== '2') return true;
-  const hasHostColumn = (tableName) => {
-    if (!tables.has(tableName)) return true;
-    return db.prepare(`PRAGMA table_info(${tableName})`).all().some((column) => column.name === 'host');
+  const hasColumn = (tableName, columnName) => {
+    if (!tables.has(tableName)) return false;
+    return db.prepare(`PRAGMA table_info(${tableName})`).all().some((column) => column.name === columnName);
   };
-  return !hasHostColumn('executions') || !hasHostColumn('completions');
+  return !hasColumn('executions', 'host')
+    || !hasColumn('completions', 'host')
+    || !hasColumn('completions', 'claim_id');
 }
 
 export class SqliteStore {
@@ -472,16 +491,24 @@ export class SqliteStore {
     return rows.map(executionFromRow);
   }
 
-  reserveDirect(input = {}) {
+  // waiter claim（架构设计 §八）：waiter 请求取得某 thread 的消费权。两条路径：
+  // (a) execution 仍 active → 在 execution 行登记 waiter reservation，terminal 的
+  //     Waiter Initial Transaction 以该 reservation 建立 claimed_waiter；
+  // (b) terminal 已发生 → 对 pending completion 直接 CAS claim（迟到 waiter）。
+  // claim 尝试前先按 thread 有界回收过期 claim（claim 层通用恢复机制，裁决 2）。
+  reserveWaiter(input = {}) {
     const options = optionsFrom(input);
     const host = requiredString(options.host, 'host');
     const workspace = requiredString(options.workspace, 'workspace');
     const sessionId = requiredString(options.sessionId, 'sessionId');
     const threadId = requiredString(options.threadId, 'threadId');
-    const requestedReservationId = requiredString(options.reservationId ?? options.deliveryId ?? randomUUID(), 'reservationId');
+    const requestedReservationId = requiredString(options.reservationId ?? randomUUID(), 'reservationId');
     const timestamp = asTimestamp(options.now);
+    const cutoff = claimCutoff(options.leaseMs, timestamp);
 
     return this.#transaction(() => {
+      this.#recoverExpiredClaims({ host, threadId, cutoff });
+
       const executionRow = this.db.prepare(`
         SELECT * FROM executions
         WHERE thread_id = ? AND host = ? AND workspace = ? AND session_id = ?
@@ -490,12 +517,12 @@ export class SqliteStore {
       const execution = executionFromRow(executionRow);
 
       if (execution) {
-        if (execution.reservationId === requestedReservationId && execution.reservationKind === 'direct') {
+        if (execution.reservationId === requestedReservationId && execution.reservationKind === 'waiter') {
           return {
             reserved: true,
             source: 'execution',
             reservationId: requestedReservationId,
-            reservationKind: 'direct',
+            reservationKind: 'waiter',
             threadId: execution.threadId,
             turnId: execution.turnId,
             host: execution.host,
@@ -508,7 +535,7 @@ export class SqliteStore {
         }
         const update = this.db.prepare(`
           UPDATE executions
-          SET reservation_id = ?, reservation_kind = 'direct', reservation_created_at = ?
+          SET reservation_id = ?, reservation_kind = 'waiter', reservation_created_at = ?
           WHERE thread_id = ? AND turn_id = ? AND host = ? AND reservation_id IS NULL
         `).run(requestedReservationId, timestamp, execution.threadId, execution.turnId, host);
         if (changesCount(update) !== 1) {
@@ -518,7 +545,7 @@ export class SqliteStore {
           reserved: true,
           source: 'execution',
           reservationId: requestedReservationId,
-          reservationKind: 'direct',
+          reservationKind: 'waiter',
           threadId: execution.threadId,
           turnId: execution.turnId,
           host: execution.host,
@@ -563,7 +590,7 @@ export class SqliteStore {
       }
       const claimed = this.db.prepare(`
         UPDATE completions
-        SET delivery_state = 'claimed_direct', delivery_id = ?, delivery_started_at = ?, delivered_at = NULL
+        SET delivery_state = 'claimed_waiter', claim_id = ?, claimed_at = ?, delivered_at = NULL
         WHERE completion_id = ? AND host = ? AND delivery_state = 'pending'
       `).run(requestedReservationId, timestamp, pendingRow.completion_id, host);
       if (changesCount(claimed) !== 1) {
@@ -574,7 +601,7 @@ export class SqliteStore {
         reserved: true,
         source: 'completion',
         reservationId: requestedReservationId,
-        reservationKind: 'direct',
+        reservationKind: 'waiter',
         threadId: completion.threadId,
         turnId: completion.turnId,
         host: completion.host,
@@ -589,22 +616,24 @@ export class SqliteStore {
     const options = optionsFrom(input);
     const host = requiredString(options.host, 'host');
     const threadId = options.threadId === undefined ? undefined : requiredString(options.threadId, 'threadId');
-    const requestedReservationId = options.reservationId ?? options.deliveryId;
+    const requestedReservationId = options.reservationId;
 
     return this.#transaction(() => {
       let completionChanges = 0;
       if (requestedReservationId !== undefined) {
         requiredString(requestedReservationId, 'reservationId');
+        // 合法性条件 = delivery_state + claim_id（reservation id 在 waiter 路径
+        // 同时充当 claim_id）；旧 claimant 的迟到 release 不得影响新 claimant。
         const completionResult = threadId === undefined
           ? this.db.prepare(`
             UPDATE completions
-            SET delivery_state = 'pending', delivery_id = NULL, delivery_started_at = NULL, delivered_at = NULL
-            WHERE host = ? AND delivery_id = ? AND delivery_state = 'claimed_direct'
+            SET delivery_state = 'pending', claim_id = NULL, claimed_at = NULL, delivered_at = NULL
+            WHERE host = ? AND claim_id = ? AND delivery_state = 'claimed_waiter'
           `).run(host, requestedReservationId)
           : this.db.prepare(`
             UPDATE completions
-            SET delivery_state = 'pending', delivery_id = NULL, delivery_started_at = NULL, delivered_at = NULL
-            WHERE host = ? AND delivery_id = ? AND thread_id = ? AND delivery_state = 'claimed_direct'
+            SET delivery_state = 'pending', claim_id = NULL, claimed_at = NULL, delivered_at = NULL
+            WHERE host = ? AND claim_id = ? AND thread_id = ? AND delivery_state = 'claimed_waiter'
           `).run(host, requestedReservationId, threadId);
         completionChanges = changesCount(completionResult);
       }
@@ -616,19 +645,19 @@ export class SqliteStore {
           executionResult = this.db.prepare(`
             UPDATE executions
             SET reservation_id = NULL, reservation_kind = NULL, reservation_created_at = NULL
-            WHERE host = ? AND thread_id = ? AND reservation_id = ? AND reservation_kind = 'direct'
+            WHERE host = ? AND thread_id = ? AND reservation_id = ? AND reservation_kind = 'waiter'
           `).run(host, threadId, requestedReservationId);
         } else if (threadId !== undefined) {
           executionResult = this.db.prepare(`
             UPDATE executions
             SET reservation_id = NULL, reservation_kind = NULL, reservation_created_at = NULL
-            WHERE host = ? AND thread_id = ? AND reservation_kind = 'direct'
+            WHERE host = ? AND thread_id = ? AND reservation_kind = 'waiter'
           `).run(host, threadId);
         } else {
           executionResult = this.db.prepare(`
             UPDATE executions
             SET reservation_id = NULL, reservation_kind = NULL, reservation_created_at = NULL
-            WHERE host = ? AND reservation_id = ? AND reservation_kind = 'direct'
+            WHERE host = ? AND reservation_id = ? AND reservation_kind = 'waiter'
           `).run(host, requestedReservationId);
         }
         executionChanges = changesCount(executionResult);
@@ -709,15 +738,18 @@ export class SqliteStore {
         sessionId = requiredString(requestedSessionId, 'sessionId');
       }
 
-      const directReservation = execution?.reservationKind === 'direct' && execution.reservationId
+      // Terminal Initiate 分支选择（裁决 4）：terminal 前已有 waiter reservation
+      // → Waiter Initial Transaction，completion 出生即 claimed_waiter（reservation id
+      // 同时充当首个 claim_id）；否则 Normal Initial Transaction，出生为 pending。
+      const waiterReservation = execution?.reservationKind === 'waiter' && execution.reservationId
         ? execution.reservationId
         : null;
-      const deliveryState = directReservation ? 'claimed_direct' : 'pending';
+      const deliveryState = waiterReservation ? 'claimed_waiter' : 'pending';
       const insertResult = this.db.prepare(`
         INSERT INTO completions(
           completion_id, thread_id, turn_id, host, workspace, session_id,
-          terminal_status, payload_json, delivery_state, delivery_id,
-          delivery_started_at, delivered_at, created_at
+          terminal_status, payload_json, delivery_state, claim_id,
+          claimed_at, delivered_at, created_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
         ON CONFLICT(thread_id, turn_id) DO NOTHING
       `).run(
@@ -730,8 +762,8 @@ export class SqliteStore {
         payload.status,
         JSON.stringify(payload),
         deliveryState,
-        directReservation,
-        directReservation ? asTimestamp(options.deliveryStartedAt ?? options.now) : null,
+        waiterReservation,
+        waiterReservation ? asTimestamp(options.claimedAt ?? options.now) : null,
         createdAt,
       );
 
@@ -791,11 +823,14 @@ export class SqliteStore {
     const host = requiredString(options.host, 'host');
     const workspace = requiredString(options.workspace, 'workspace');
     const sessionId = requiredString(options.sessionId, 'sessionId');
-    const deliveryId = requiredString(options.deliveryId ?? randomUUID(), 'deliveryId');
+    const claimId = requiredString(options.claimId ?? randomUUID(), 'claimId');
     const timestamp = asTimestamp(options.now);
+    const cutoff = claimCutoff(options.leaseMs, timestamp);
     const limit = positiveInteger(options.limit, 100);
 
     return this.#transaction(() => {
+      // claim 层通用孤儿恢复（裁决 2）：session 有界，先回收过期 claim 再 CAS 认领。
+      this.#recoverExpiredClaims({ host, workspace, sessionId, cutoff });
       const rows = this.db.prepare(`
         SELECT completion_id FROM completions
         WHERE host = ? AND workspace = ? AND session_id = ? AND delivery_state = 'pending'
@@ -805,11 +840,11 @@ export class SqliteStore {
       const claimedIds = [];
       const update = this.db.prepare(`
         UPDATE completions
-        SET delivery_state = 'claimed_hook', delivery_id = ?, delivery_started_at = ?, delivered_at = NULL
+        SET delivery_state = 'claimed_hook', claim_id = ?, claimed_at = ?, delivered_at = NULL
         WHERE completion_id = ? AND host = ? AND delivery_state = 'pending'
       `);
       for (const row of rows) {
-        const result = update.run(deliveryId, timestamp, row.completion_id, host);
+        const result = update.run(claimId, timestamp, row.completion_id, host);
         if (changesCount(result) === 1) claimedIds.push(row.completion_id);
       }
       return claimedIds.map((completionId) => this.#findCompletion(completionId));
@@ -819,20 +854,20 @@ export class SqliteStore {
   ackDelivery(input = {}) {
     const options = optionsFrom(input);
     const host = requiredString(options.host, 'host');
-    const deliveryId = requiredString(options.deliveryId, 'deliveryId');
+    const claimId = requiredString(options.claimId, 'claimId');
     const deliveredAt = asTimestamp(options.now);
 
     return this.#transaction(() => {
       const rows = this.db.prepare(`
         SELECT completion_id FROM completions
-        WHERE host = ? AND delivery_id = ? AND delivery_state IN ('claimed_direct', 'claimed_hook')
-      `).all(host, deliveryId);
+        WHERE host = ? AND claim_id = ? AND delivery_state IN ('claimed_waiter', 'claimed_hook')
+      `).all(host, claimId);
       if (rows.length === 0) return null;
       const result = this.db.prepare(`
         UPDATE completions
         SET delivery_state = 'delivered', delivered_at = ?
-        WHERE host = ? AND delivery_id = ? AND delivery_state IN ('claimed_direct', 'claimed_hook')
-      `).run(deliveredAt, host, deliveryId);
+        WHERE host = ? AND claim_id = ? AND delivery_state IN ('claimed_waiter', 'claimed_hook')
+      `).run(deliveredAt, host, claimId);
       const count = changesCount(result);
       if (count === 0) return null;
       const completions = rows.map((row) => this.#findCompletion(row.completion_id));
@@ -848,19 +883,19 @@ export class SqliteStore {
   nackDelivery(input = {}) {
     const options = optionsFrom(input);
     const host = requiredString(options.host, 'host');
-    const deliveryId = requiredString(options.deliveryId, 'deliveryId');
+    const claimId = requiredString(options.claimId, 'claimId');
 
     return this.#transaction(() => {
       const rows = this.db.prepare(`
         SELECT completion_id FROM completions
-        WHERE host = ? AND delivery_id = ? AND delivery_state IN ('claimed_direct', 'claimed_hook')
-      `).all(host, deliveryId);
+        WHERE host = ? AND claim_id = ? AND delivery_state IN ('claimed_waiter', 'claimed_hook')
+      `).all(host, claimId);
       if (rows.length === 0) return null;
       const result = this.db.prepare(`
         UPDATE completions
-        SET delivery_state = 'pending', delivery_id = NULL, delivery_started_at = NULL, delivered_at = NULL
-        WHERE host = ? AND delivery_id = ? AND delivery_state IN ('claimed_direct', 'claimed_hook')
-      `).run(host, deliveryId);
+        SET delivery_state = 'pending', claim_id = NULL, claimed_at = NULL, delivered_at = NULL
+        WHERE host = ? AND claim_id = ? AND delivery_state IN ('claimed_waiter', 'claimed_hook')
+      `).run(host, claimId);
       const count = changesCount(result);
       if (count === 0) return null;
       const completions = rows.map((row) => this.#findCompletion(row.completion_id));
@@ -873,23 +908,55 @@ export class SqliteStore {
     });
   }
 
-  requeueExpiredLeases(options = {}) {
+  // claim 层通用孤儿恢复的独立入口（裁决 2）：无启动 sweep，由消费者在 claim 前
+  // 调用；可选 host/workspace/sessionId/threadId 有界过滤，缺省为全表（仅测试用）。
+  recoverExpiredClaims(options = {}) {
     const now = asTimestamp(options.now);
-    const leaseMs = options.leaseMs ?? options.leaseDurationMs ?? DEFAULT_DELIVERY_LEASE_MS;
-    if (!Number.isSafeInteger(leaseMs) || leaseMs < 0) {
-      throw new TypeError('leaseMs must be a non-negative integer.');
+    const cutoff = claimCutoff(options.leaseMs, now);
+    if (options.host !== undefined) requiredString(options.host, 'host');
+    if (options.workspace !== undefined) requiredString(options.workspace, 'workspace');
+    if (options.sessionId !== undefined) requiredString(options.sessionId, 'sessionId');
+    if (options.threadId !== undefined) requiredString(options.threadId, 'threadId');
+    return this.#transaction(() => this.#recoverExpiredClaims({
+      host: options.host,
+      workspace: options.workspace,
+      sessionId: options.sessionId,
+      threadId: options.threadId,
+      cutoff,
+    }));
+  }
+
+  // 回收过期 claim（claimed_at 早于 cutoff 的 claimed_waiter/claimed_hook）回 pending。
+  // claimed_at 为 NULL 的异常行不属于可判定事实，保持不动（fail-safe）。
+  #recoverExpiredClaims({ host, workspace, sessionId, threadId, cutoff }) {
+    const clauses = [
+      "delivery_state IN ('claimed_waiter', 'claimed_hook')",
+      'claimed_at IS NOT NULL',
+      'claimed_at <= ?',
+    ];
+    const values = [cutoff];
+    if (host !== undefined) {
+      clauses.push('host = ?');
+      values.push(host);
     }
-    const cutoff = new Date(Date.parse(now) - leaseMs).toISOString();
-    return this.#transaction(() => {
-      const result = this.db.prepare(`
-        UPDATE completions
-        SET delivery_state = 'pending', delivery_id = NULL, delivery_started_at = NULL, delivered_at = NULL
-        WHERE delivery_state IN ('claimed_direct', 'claimed_hook')
-          AND delivery_started_at IS NOT NULL
-          AND delivery_started_at <= ?
-      `).run(cutoff);
-      return changesCount(result);
-    });
+    if (workspace !== undefined) {
+      clauses.push('workspace = ?');
+      values.push(workspace);
+    }
+    if (sessionId !== undefined) {
+      clauses.push('session_id = ?');
+      values.push(sessionId);
+    }
+    if (threadId !== undefined) {
+      clauses.push('thread_id = ?');
+      values.push(threadId);
+    }
+    const result = this.db.prepare(`
+      UPDATE completions
+      SET delivery_state = 'pending', claim_id = NULL, claimed_at = NULL, delivered_at = NULL
+      WHERE ${clauses.join(' AND ')}
+    `).run(...values);
+    return changesCount(result);
   }
 
   attachHostPresence(input = {}) {

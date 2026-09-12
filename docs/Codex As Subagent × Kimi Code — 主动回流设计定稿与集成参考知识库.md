@@ -5,7 +5,7 @@
 **目标宿主：新版 Node.js Kimi Code**
 **项目：Codex As Subagent**
 
-> **V2 状态标注（2026-09-12）**：本文是 V1 Kimi 集成设计定稿与协议参考。其中与 worker/attach/polling 相关的**设计内容**（detached worker、`kimi-web --attach/--detach/--worker` CLI、worker registry、`kimi-code-web` host 值）已被 V2 废除，现行设计以三份 V2 文稿为准——Web 回流为 Runtime 内部事件驱动 delivery，TUI/Web 统一 `host = kimi-code`。本文的**协议事实部分**（Kimi Hook payload 形状、block 语义、Server instance registry、`server.token`、prompt/steer API、envelope 与幂等码）仍作为 Host Adapter 实现的协议依据继续有效。
+> **V2 状态标注（2026-09-12 收口后）**：本文是 V1 Kimi 集成设计定稿与协议参考。其中与 Web 主动回流相关的**设计内容**（detached worker、`kimi-web --attach/--detach/--worker` CLI、worker registry、`kimi-code-web` host 值，以及 Runtime 内部事件驱动 Web delivery）已全部废除——**当前 V2 的唯一主动 Mailbox delivery transport 是 Hook**，Web Push 不进入当前版本，未来重做时按届时设计实现。TUI/Web 统一 `host = kimi-code`。本文的**协议事实部分**（Kimi Hook payload 形状、block 语义、Server instance registry、`server.token`、prompt/steer API、envelope 与幂等码）仍作为 Host Adapter 与未来 Web transport 的协议依据继续有效。
 
 ---
 

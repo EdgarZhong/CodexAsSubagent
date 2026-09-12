@@ -20,13 +20,13 @@ function row(completionId = 'completion-1') {
 test('drainPending claims before rendering and ACKs only after output succeeds', async () => {
   const events = [];
   const store = {
-    requeueExpiredLeases() { events.push('requeue'); return 0; },
+    recoverExpiredClaims() { events.push('requeue'); return 0; },
     claimPendingHook(input) {
       events.push(['claim', input.workspace, input.host, input.sessionId]);
       return [row()];
     },
     ackDelivery(input) {
-      events.push(['ack', input.deliveryId, input.host]);
+      events.push(['ack', input.claimId, input.host]);
       return { acknowledged: true };
     },
   };
@@ -42,7 +42,7 @@ test('drainPending claims before rendering and ACKs only after output succeeds',
     host: 'plain',
     sessionId: 'session-1',
     store,
-    deliveryId: 'hook-delivery-1',
+    claimId: 'hook-delivery-1',
     renderer(completions) {
       events.push(['render', completions[0].completionId]);
       return 'rendered completion';
@@ -78,7 +78,7 @@ test('drainPending rejects workspace-only drains (host and session are mandatory
 test('a render crash leaves the claimed lease for expiry-based recovery', async () => {
   let state = 'pending';
   const store = {
-    requeueExpiredLeases() {
+    recoverExpiredClaims() {
       if (state === 'claimed_hook') state = 'pending';
       return 1;
     },
@@ -96,7 +96,7 @@ test('a render crash leaves the claimed lease for expiry-based recovery', async 
     /render crashed/,
   );
   assert.equal(state, 'claimed_hook');
-  store.requeueExpiredLeases();
+  store.recoverExpiredClaims();
   assert.equal(state, 'pending');
 });
 

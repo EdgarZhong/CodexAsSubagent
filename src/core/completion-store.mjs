@@ -46,8 +46,8 @@ export class CompletionStore {
     return this.store.nackDelivery(input);
   }
 
-  requeueExpiredLeases(options = {}) {
-    return this.store.requeueExpiredLeases(options);
+  recoverExpiredClaims(options = {}) {
+    return this.store.recoverExpiredClaims(options);
   }
 
   getCompletion(completionOrOptions) {

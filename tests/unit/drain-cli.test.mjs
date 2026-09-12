@@ -7,7 +7,7 @@ function fakeStore({ pending = [] } = {}) {
   const calls = [];
   const store = {
     calls,
-    requeueExpiredLeases(options) { calls.push(['requeue', options]); return 0; },
+    recoverExpiredClaims(options) { calls.push(['requeue', options]); return 0; },
     claimPendingHook(input) { calls.push(['claim', input]); return pending; },
     ackDelivery(input) { calls.push(['ack', input]); return { acknowledged: true }; },
     close() { calls.push(['close']); },
@@ -79,7 +79,7 @@ test('drain constructs the full DeliveryContext (host + canonical workspace + se
     workspace: '/canonical/repo/a',
     sessionId: 'session-A',
     limit: 100,
-    deliveryId: claim[1].deliveryId,
+    claimId: claim[1].claimId,
     now: claim[1].now,
   });
   const ack = store.calls.find(([kind]) => kind === 'ack');

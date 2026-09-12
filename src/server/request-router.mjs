@@ -48,10 +48,10 @@ export class RequestRouter {
 
   async dispatch(method, params, context) {
     if (method === 'delivery.ack') {
-      return { acknowledged: Boolean(this.runtime.ackDeliveryId(params.deliveryId, context?.host)) };
+      return { acknowledged: Boolean(this.runtime.ackClaim(params.claimId, context?.host)) };
     }
     if (method === 'delivery.nack') {
-      return { released: Boolean(this.runtime.releaseDeliveryId(params.deliveryId, context?.host)) };
+      return { released: Boolean(this.runtime.releaseClaim(params.claimId, context?.host)) };
     }
     const operation = METHODS[method];
     if (!operation) throw new DomainError('method_not_found', `Unknown Runtime method: ${method}`);
@@ -81,14 +81,14 @@ export class RequestRouter {
     try {
       const params = internalParams(request);
       const value = await this.dispatch(request.method, params, request.context);
-      const deliveryId = (request.method === 'runtime.wait' || request.method === 'runtime.wait_many'
+      const claimId = (request.method === 'runtime.wait' || request.method === 'runtime.wait_many'
         || request.method === 'codex_wait' || request.method === 'codex_wait_many')
-        ? this.runtime.deliveryIdFor(value)
+        ? this.runtime.claimIdFor(value)
         : null;
       return {
         id: request.id,
         result: project(value),
-        ...(deliveryId ? { deliveryId } : {}),
+        ...(claimId ? { claimId } : {}),
       };
     } catch (error) {
       return {

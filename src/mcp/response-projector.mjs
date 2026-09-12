@@ -1,5 +1,5 @@
 const INTERNAL_KEYS = new Set([
-  'approval', 'cwd', 'cursor', 'deliveryId', 'eventCursor', 'internalTurnId',
+  'approval', 'cwd', 'cursor', 'claimId', 'eventCursor', 'internalTurnId',
   'params', 'raw', 'sandbox', 'turnId', 'workspace', 'request', 'requestId',
   'reservation', 'reservationId', 'reservationKind', 'reservationCreatedAt',
   'receivedAt', 'sequence', 'requestKey', 'config', 'effectiveConfig',

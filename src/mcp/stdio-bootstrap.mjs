@@ -210,11 +210,11 @@ export class StdioBootstrap {
     });
   }
 
-  async #reportDelivery(context, method, deliveryId) {
+  async #reportDelivery(context, method, claimId) {
     return await this.forward({
       id: nextId(),
       method,
-      params: { deliveryId, host: context?.host },
+      params: { claimId, host: context?.host },
     }, context);
   }
 
@@ -228,16 +228,16 @@ export class StdioBootstrap {
     } catch (error) {
       // stdout 写出失败：宿主永远看不到该 delivery，立即 NACK 回 pending
       // （V2：不再放任 lease 过期），然后让错误传播终止循环。
-      if (response.deliveryId) {
-        await this.#reportDelivery(context, 'delivery.nack', response.deliveryId).catch(() => {});
+      if (response.claimId) {
+        await this.#reportDelivery(context, 'delivery.nack', response.claimId).catch(() => {});
       }
       throw error;
     }
-    if (response.deliveryId) {
+    if (response.claimId) {
       try {
-        await this.#reportDelivery(context, 'delivery.ack', response.deliveryId);
+        await this.#reportDelivery(context, 'delivery.ack', response.claimId);
       } catch {
-        await this.#reportDelivery(context, 'delivery.nack', response.deliveryId).catch(() => {});
+        await this.#reportDelivery(context, 'delivery.nack', response.claimId).catch(() => {});
       }
     }
     return publicResponse;
@@ -269,7 +269,7 @@ export class StdioBootstrap {
     };
     return {
       response: jsonRpcResult(id, result),
-      deliveryId: response.deliveryId ?? null,
+      claimId: response.claimId ?? null,
     };
   }
 
@@ -330,27 +330,27 @@ export class StdioBootstrap {
       try {
         await this.#write(response);
       } catch (writeError) {
-        if (forwarded?.deliveryId) {
-          await this.#reportDelivery(context, 'delivery.nack', forwarded.deliveryId).catch(() => {});
+        if (forwarded?.claimId) {
+          await this.#reportDelivery(context, 'delivery.nack', forwarded.claimId).catch(() => {});
         }
         throw writeError;
       }
       return response;
     }
-    const { response, deliveryId } = forwarded;
+    const { response, claimId } = forwarded;
     try {
       await this.#write(response);
     } catch (error) {
-      if (deliveryId) {
-        await this.#reportDelivery(context, 'delivery.nack', deliveryId).catch(() => {});
+      if (claimId) {
+        await this.#reportDelivery(context, 'delivery.nack', claimId).catch(() => {});
       }
       throw error;
     }
-    if (deliveryId) {
+    if (claimId) {
       try {
-        await this.#reportDelivery(context, 'delivery.ack', deliveryId);
+        await this.#reportDelivery(context, 'delivery.ack', claimId);
       } catch {
-        await this.#reportDelivery(context, 'delivery.nack', deliveryId).catch(() => {});
+        await this.#reportDelivery(context, 'delivery.nack', claimId).catch(() => {});
       }
     }
     return response;

@@ -50,7 +50,7 @@ test('public projection recursively removes runtime-only fields while preserving
     threadId: 'thread-1',
     status: 'completed',
     turnId: 'turn-hidden',
-    deliveryId: 'delivery-hidden',
+    claimId: 'delivery-hidden',
     workspace: '/private/workspace',
     changes: { files: ['src/app.mjs'], raw: { secret: true } },
     nested: { cursor: 'cursor-hidden', value: 'visible' },

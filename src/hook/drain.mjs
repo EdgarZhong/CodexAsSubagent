@@ -29,7 +29,7 @@ export async function drainPending({
   sessionId,
   store,
   limit = 100,
-  deliveryId = randomUUID(),
+  claimId = randomUUID(),
   now = new Date(),
   leaseMs,
   output = null,
@@ -48,15 +48,16 @@ export async function drainPending({
   if (!store || typeof store.claimPendingHook !== 'function' || typeof store.ackDelivery !== 'function') {
     throw new TypeError('drainPending requires a CompletionStore.');
   }
-  if (typeof store.requeueExpiredLeases === 'function') {
-    store.requeueExpiredLeases({ now, ...(leaseMs === undefined ? {} : { leaseMs }) });
+  // claim 层通用孤儿恢复（裁决 2）：session 有界，先回收过期 claim 再 CAS 认领。
+  if (typeof store.recoverExpiredClaims === 'function') {
+    store.recoverExpiredClaims({ host, workspace, sessionId, now, ...(leaseMs === undefined ? {} : { leaseMs }) });
   }
   const completions = store.claimPendingHook({
     workspace: workspace,
     host,
     sessionId,
     limit,
-    deliveryId,
+    claimId: claimId,
     now,
   });
   if (!Array.isArray(completions)) throw new TypeError('CompletionStore.claimPendingHook must return an array.');
@@ -65,7 +66,7 @@ export async function drainPending({
       workspace: workspace,
       host,
       sessionId,
-      deliveryId,
+      claimId,
       completions: [],
       text: '',
       acknowledged: false,
@@ -74,12 +75,12 @@ export async function drainPending({
   }
   const text = renderer(completions, host, context);
   await writeOutput(output, text);
-  const ack = store.ackDelivery({ deliveryId, now, host });
+  const ack = store.ackDelivery({ claimId: claimId, now, host });
   return {
     workspace: workspace,
     host,
     sessionId,
-    deliveryId,
+    claimId,
     completions,
     text,
     acknowledged: acknowledged(ack),

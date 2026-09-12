@@ -11,7 +11,7 @@ function activeCount(runtime) {
 }
 
 function unackedCount(runtime) {
-  return runtime?.completionStore?.listCompletions?.({ deliveryState: 'claimed_direct' }).length ?? 0;
+  return runtime?.completionStore?.listCompletions?.({ deliveryState: 'claimed_waiter' }).length ?? 0;
 }
 
 export class RuntimeServer {

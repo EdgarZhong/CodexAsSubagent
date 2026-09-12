@@ -35,7 +35,7 @@ function fakeStore({
   const calls = [];
   const store = {
     calls,
-    requeueExpiredLeases(options) { calls.push(['requeue', options]); return 0; },
+    recoverExpiredClaims(options) { calls.push(['requeue', options]); return 0; },
     claimPendingHook(input) {
       calls.push(['claim', input]);
       if (claimError) throw claimError;
@@ -105,12 +105,12 @@ test('pending mailbox delivery wins: injects via block semantics and skips the s
     workspace: '/canonical/repo/a',
     sessionId: 'session-A',
     limit: 100,
-    deliveryId: claim[1].deliveryId,
+    claimId: claim[1].claimId,
     now: claim[1].now,
   });
   const ack = store.calls.find(([kind]) => kind === 'ack');
   assert.equal(ack[1].host, 'kimi-code');
-  assert.ok(ack[1].deliveryId);
+  assert.ok(ack[1].claimId);
   assert.equal(store.calls.some(([kind]) => kind === 'gate'), false, 'injection must bypass the gate');
 });
 

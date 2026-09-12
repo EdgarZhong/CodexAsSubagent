@@ -144,8 +144,8 @@ test('SqliteStore creates the V2 schema with host/session scoping and required p
     'terminal_status',
     'payload_json',
     'delivery_state',
-    'delivery_id',
-    'delivery_started_at',
+    'claim_id',
+    'claimed_at',
     'delivered_at',
     'created_at',
   ]);
@@ -208,8 +208,8 @@ test('legacy V1 databases are destructively rebuilt into the V2 schema on open',
       terminal_status TEXT NOT NULL,
       payload_json TEXT NOT NULL,
       delivery_state TEXT NOT NULL,
-      delivery_id TEXT,
-      delivery_started_at TEXT,
+      claim_id TEXT,
+      claimed_at TEXT,
       delivered_at TEXT,
       created_at TEXT NOT NULL,
       UNIQUE (thread_id, turn_id)
@@ -441,7 +441,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
     ownerInstanceId: 'instance-1',
   }));
 
-  const wrongHost = executions.reserveDirect({
+  const wrongHost = executions.reserveWaiter({
     host: 'zcode',
     workspace,
     sessionId: 'session-a',
@@ -453,7 +453,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
   assert.equal(wrongHost.reason, 'host_mismatch');
   assert.equal(wrongHost.holderHost, 'kimi-code');
 
-  const wrongSession = executions.reserveDirect({
+  const wrongSession = executions.reserveWaiter({
     host: 'kimi-code',
     workspace,
     sessionId: 'session-b',
@@ -465,7 +465,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
   assert.equal(wrongSession.reason, 'session_mismatch');
   assert.equal(wrongSession.holderSessionId, 'session-a');
 
-  const first = executions.reserveDirect({
+  const first = executions.reserveWaiter({
     host: 'kimi-code',
     workspace,
     sessionId: 'session-a',
@@ -473,7 +473,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
     reservationId: 'direct-reservation',
     now: plusSeconds(T0, 1),
   });
-  const second = executions.reserveDirect({
+  const second = executions.reserveWaiter({
     host: 'kimi-code',
     workspace,
     sessionId: 'session-a',
@@ -492,21 +492,21 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
     workspace,
     { completionId: 'direct-completion' },
   ));
-  assert.equal(completion.deliveryState, 'claimed_direct');
-  assert.equal(completion.deliveryId, 'direct-reservation');
+  assert.equal(completion.deliveryState, 'claimed_waiter');
+  assert.equal(completion.claimId, 'direct-reservation');
 
-  // ACK 必须匹配 host：错误 host + 正确 deliveryId 不生效；缺失 host 直接 fail closed。
-  assert.equal(completions.ackDelivery({ host: 'zcode', deliveryId: 'direct-reservation', now: T0 }), null);
-  assert.equal(completions.getCompletion('direct-completion').deliveryState, 'claimed_direct');
+  // ACK 必须匹配 host：错误 host + 正确 claimId 不生效；缺失 host 直接 fail closed。
+  assert.equal(completions.ackDelivery({ host: 'zcode', claimId: 'direct-reservation', now: T0 }), null);
+  assert.equal(completions.getCompletion('direct-completion').deliveryState, 'claimed_waiter');
   assert.throws(
-    () => completions.ackDelivery({ deliveryId: 'direct-reservation', now: T0 }),
+    () => completions.ackDelivery({ claimId: 'direct-reservation', now: T0 }),
     /host/,
   );
-  assert.equal(completions.getCompletion('direct-completion').deliveryState, 'claimed_direct');
+  assert.equal(completions.getCompletion('direct-completion').deliveryState, 'claimed_waiter');
   assert.equal(
     completions.ackDelivery({
       host: 'kimi-code',
-      deliveryId: 'direct-reservation',
+      claimId: 'direct-reservation',
       now: plusSeconds(T0, 3),
     }).deliveryState,
     'delivered',
@@ -533,7 +533,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
     now: plusSeconds(T0, 10),
   });
   assert.equal(claimed.deliveryState, 'claimed_hook');
-  assert.equal(completions.requeueExpiredLeases({ now: plusSeconds(T0, 41) }), 1);
+  assert.equal(completions.recoverExpiredClaims({ now: plusSeconds(T0, 41) }), 1);
   assert.equal(completions.getCompletion('hook-lease-completion').deliveryState, 'pending');
 
   // Pending completion 抢占按 host+workspace+session 完整谓词。
@@ -550,7 +550,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
     { completionId: 'pending-direct-completion' },
   ));
   assert.equal(pendingDirect.deliveryState, 'pending');
-  const excluded = executions.reserveDirect({
+  const excluded = executions.reserveWaiter({
     host: 'kimi-code',
     workspace,
     sessionId: 'session-b',
@@ -560,7 +560,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
   });
   assert.equal(excluded.reserved, false);
   assert.equal(excluded.reason, 'not_found');
-  const directClaim = executions.reserveDirect({
+  const directClaim = executions.reserveWaiter({
     host: 'kimi-code',
     workspace,
     sessionId: 'session-a',
@@ -569,7 +569,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
     now: T0,
   });
   assert.equal(directClaim.source, 'completion');
-  assert.equal(completions.getCompletion('pending-direct-completion').deliveryState, 'claimed_direct');
+  assert.equal(completions.getCompletion('pending-direct-completion').deliveryState, 'claimed_waiter');
   assert.equal(
     executions.releaseReservation({ host: 'kimi-code', reservationId: 'pending-direct-reservation' }).released,
     true,
@@ -583,7 +583,7 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
     turnId: 'turn-direct-lease',
     ownerInstanceId: 'instance-1',
   }));
-  executions.reserveDirect({
+  executions.reserveWaiter({
     host: 'kimi-code',
     workspace,
     sessionId: 'session-a',
@@ -597,10 +597,10 @@ test('direct reservation is host/session scoped, ACK requires host, and expired 
     workspace,
     { completionId: 'direct-lease-completion', now: T0 },
   ));
-  assert.equal(directLease.deliveryState, 'claimed_direct');
-  assert.equal(completions.requeueExpiredLeases({ now: plusSeconds(T0, 29.999) }), 0);
-  assert.equal(completions.getCompletion('direct-lease-completion').deliveryState, 'claimed_direct');
-  assert.equal(completions.requeueExpiredLeases({ now: plusSeconds(T0, 30) }), 1);
+  assert.equal(directLease.deliveryState, 'claimed_waiter');
+  assert.equal(completions.recoverExpiredClaims({ now: plusSeconds(T0, 29.999) }), 0);
+  assert.equal(completions.getCompletion('direct-lease-completion').deliveryState, 'claimed_waiter');
+  assert.equal(completions.recoverExpiredClaims({ now: plusSeconds(T0, 30) }), 1);
   assert.equal(completions.getCompletion('direct-lease-completion').deliveryState, 'pending');
 });
 
@@ -621,7 +621,7 @@ test('hook claims and nack are isolated across hosts and sessions', async (t) =>
     host: 'kimi-code',
     workspace: '/workspace/main',
     sessionId: 'session-a',
-    deliveryId: 'hook-1',
+    claimId: 'hook-1',
     now: T0,
   });
   assert.deepEqual(kimiClaims.map((row) => row.completionId), ['thread-h1-turn-h1-completion']);
@@ -630,7 +630,7 @@ test('hook claims and nack are isolated across hosts and sessions', async (t) =>
     host: 'zcode',
     workspace: '/workspace/main',
     sessionId: 'session-a',
-    deliveryId: 'hook-2',
+    claimId: 'hook-2',
     now: T0,
   });
   assert.deepEqual(zcodeClaims.map((row) => row.completionId), ['thread-h2-turn-h2-completion']);
@@ -639,7 +639,7 @@ test('hook claims and nack are isolated across hosts and sessions', async (t) =>
     host: 'kimi-code',
     workspace: '/workspace/main',
     sessionId: 'session-b',
-    deliveryId: 'hook-3',
+    claimId: 'hook-3',
     now: T0,
   });
   assert.deepEqual(sessionBClaims.map((row) => row.completionId), ['thread-h3-turn-h3-completion']);
@@ -649,12 +649,12 @@ test('hook claims and nack are isolated across hosts and sessions', async (t) =>
   assert.equal(completions.listCompletions({ host: 'zcode' }).length, 1);
 
   // NACK 同样必须匹配 host。
-  assert.equal(completions.nackDelivery({ host: 'zcode', deliveryId: 'hook-1' }), null);
+  assert.equal(completions.nackDelivery({ host: 'zcode', claimId: 'hook-1' }), null);
   assert.equal(completions.getCompletion('thread-h1-turn-h1-completion').deliveryState, 'claimed_hook');
-  const nacked = completions.nackDelivery({ host: 'kimi-code', deliveryId: 'hook-1' });
+  const nacked = completions.nackDelivery({ host: 'kimi-code', claimId: 'hook-1' });
   assert.equal(nacked.nacked, true);
   assert.equal(nacked.deliveryState, 'pending');
-  assert.equal(nacked.deliveryId, null);
+  assert.equal(nacked.claimId, null);
   assert.equal(completions.getCompletion('thread-h1-turn-h1-completion').deliveryState, 'pending');
 });
 
@@ -684,22 +684,22 @@ test('two racing Hook Workers can claim a pending completion only once', async (
         host: workerData.host,
         workspace: workerData.workspace,
         sessionId: workerData.sessionId,
-        deliveryId: workerData.deliveryId,
+        claimId: workerData.claimId,
       });
       parentPort.postMessage({
         type: 'result',
         count: claimed.length,
-        deliveryId: claimed[0]?.deliveryId ?? null,
+        claimId: claimed[0]?.claimId ?? null,
       });
       store.close();
     })().catch((error) => parentPort.postMessage({ type: 'error', message: error.message }));
   `;
-  const workers = ['hook-a', 'hook-b'].map((deliveryId) => new Worker(workerSource, {
+  const workers = ['hook-a', 'hook-b'].map((claimId) => new Worker(workerSource, {
     eval: true,
     workerData: {
       barrier,
       dataDir,
-      deliveryId,
+      claimId,
       host: 'kimi-code',
       sessionId: 'session-a',
       sqliteModule,
@@ -714,10 +714,10 @@ test('two racing Hook Workers can claim a pending completion only once', async (
   Atomics.notify(new Int32Array(barrier), 0, workers.length);
   const [first, second] = await Promise.all(results);
   assert.equal(first.count + second.count, 1);
-  assert.equal([first.deliveryId, second.deliveryId].filter(Boolean).length, 1);
+  assert.equal([first.claimId, second.claimId].filter(Boolean).length, 1);
   const claimed = completions.getCompletion('thread-race-turn-race-completion');
   assert.equal(claimed.deliveryState, 'claimed_hook');
-  assert.equal(claimed.deliveryId, first.deliveryId ?? second.deliveryId);
+  assert.equal(claimed.claimId, first.claimId ?? second.claimId);
 });
 
 test('session gate follows the four-branch state machine with atomic establishment', async (t) => {
@@ -1263,4 +1263,232 @@ test('releaseThreadHold releases precisely by hold_id and never clobbers a repla
   assert.equal(secondAcquire.status, 'acquired');
   assert.equal(store.releaseThreadHold('thread-2', 'hold-10').released, true);
   assert.equal(store.getThreadHold('thread-2'), null);
+});
+
+test('late ACK/NACK from a stale claimant never clobbers a newer claim (hook and waiter paths)', async (t) => {
+  const { store } = await openStore(t);
+  const executions = new ExecutionStore(store);
+  const completions = new CompletionStore(store);
+  const workspace = '/workspace/claim-isolation';
+
+  // Hook 路径：claim A → nack 回 pending → claim B → A 的迟到 ACK/NACK 均无效。
+  const pending = insertProvenancedCompletion(store, { threadId: 'thread-iso', turnId: 'turn-iso', workspace });
+  assert.equal(pending.deliveryState, 'pending');
+  const [claimA] = completions.claimPendingHook({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    claimId: 'claim-A',
+    now: plusSeconds(T0, 1),
+  });
+  assert.equal(claimA.deliveryState, 'claimed_hook');
+  assert.equal(claimA.claimId, 'claim-A');
+  assert.equal(
+    completions.nackDelivery({ host: 'kimi-code', claimId: 'claim-A', now: plusSeconds(T0, 2) }).nacked,
+    true,
+  );
+  assert.equal(completions.getCompletion('thread-iso-turn-iso-completion').deliveryState, 'pending');
+
+  const [claimB] = completions.claimPendingHook({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    claimId: 'claim-B',
+    now: plusSeconds(T0, 3),
+  });
+  assert.equal(claimB.claimId, 'claim-B');
+  assert.equal(completions.ackDelivery({ host: 'kimi-code', claimId: 'claim-A', now: plusSeconds(T0, 4) }), null);
+  assert.equal(completions.nackDelivery({ host: 'kimi-code', claimId: 'claim-A', now: plusSeconds(T0, 4) }), null);
+  const afterLateA = completions.getCompletion('thread-iso-turn-iso-completion');
+  assert.equal(afterLateA.deliveryState, 'claimed_hook');
+  assert.equal(afterLateA.claimId, 'claim-B');
+  assert.equal(
+    completions.ackDelivery({ host: 'kimi-code', claimId: 'claim-B', now: plusSeconds(T0, 5) }).deliveryState,
+    'delivered',
+  );
+
+  // Waiter 路径：waiter claim A（出生态）→ release 回 pending → hook claim B →
+  // A 的迟到 ACK 不得影响 B 的 claim。
+  executions.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-iso-w',
+    turnId: 'turn-iso-w',
+    ownerInstanceId: 'instance-1',
+  }));
+  const reserved = executions.reserveWaiter({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    threadId: 'thread-iso-w',
+    reservationId: 'waiter-A',
+    now: plusSeconds(T0, 6),
+  });
+  assert.equal(reserved.reserved, true);
+  const born = completions.insertCompletionFirst(terminal(
+    'thread-iso-w',
+    'turn-iso-w',
+    workspace,
+    { completionId: 'iso-w-completion', now: plusSeconds(T0, 6) },
+  ));
+  assert.equal(born.deliveryState, 'claimed_waiter');
+  assert.equal(born.claimId, 'waiter-A');
+  assert.equal(
+    executions.releaseReservation({ host: 'kimi-code', threadId: 'thread-iso-w', reservationId: 'waiter-A' }).released,
+    true,
+  );
+  assert.equal(completions.getCompletion('iso-w-completion').deliveryState, 'pending');
+  const [hookClaim] = completions.claimPendingHook({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    claimId: 'hook-B',
+    now: plusSeconds(T0, 7),
+  });
+  assert.equal(hookClaim.claimId, 'hook-B');
+  assert.equal(completions.ackDelivery({ host: 'kimi-code', claimId: 'waiter-A', now: plusSeconds(T0, 8) }), null);
+  const afterLateWaiter = completions.getCompletion('iso-w-completion');
+  assert.equal(afterLateWaiter.deliveryState, 'claimed_hook');
+  assert.equal(afterLateWaiter.claimId, 'hook-B');
+});
+
+test('claim-layer recovery requeues expired claims before consumer CAS claims', async (t) => {
+  const { store } = await openStore(t);
+  const executions = new ExecutionStore(store);
+  const completions = new CompletionStore(store);
+  const workspace = '/workspace/claim-recovery';
+
+  // (a) 过期 claimed_hook 在迟到 waiter 认领前被回收（thread 有界）。
+  const staleHook = insertProvenancedCompletion(store, {
+    threadId: 'thread-rec-h',
+    turnId: 'turn-rec-h',
+    workspace,
+    now: plusSeconds(T0, 1),
+  });
+  completions.claimPendingHook({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    claimId: 'dead-hook',
+    now: plusSeconds(T0, 2),
+  });
+  assert.equal(completions.getCompletion(staleHook.completionId).deliveryState, 'claimed_hook');
+
+  // 未过期的 claim 不得被回收：claim 时间在 lease 窗口内 → waiter 认领失败。
+  const notExpired = executions.reserveWaiter({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    threadId: 'thread-rec-h',
+    reservationId: 'not-expired-waiter',
+    now: plusSeconds(T0, 4),
+    leaseMs: 5_000,
+  });
+  assert.equal(notExpired.reserved, false);
+  assert.equal(notExpired.reason, 'not_found');
+
+  const lateWaiter = executions.reserveWaiter({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    threadId: 'thread-rec-h',
+    reservationId: 'late-waiter',
+    now: plusSeconds(T0, 10),
+    leaseMs: 5_000,
+  });
+  assert.equal(lateWaiter.reserved, true);
+  assert.equal(lateWaiter.source, 'completion');
+  assert.equal(lateWaiter.completion.deliveryState, 'claimed_waiter');
+  assert.equal(lateWaiter.completion.claimId, 'late-waiter');
+
+  // (b) 过期 claimed_waiter 在 Hook 认领前被回收（session 有界）。
+  executions.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-rec-w',
+    turnId: 'turn-rec-w',
+    ownerInstanceId: 'instance-1',
+  }));
+  executions.reserveWaiter({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    threadId: 'thread-rec-w',
+    reservationId: 'dead-waiter',
+    now: plusSeconds(T0, 20),
+  });
+  const bornWaiter = completions.insertCompletionFirst(terminal(
+    'thread-rec-w',
+    'turn-rec-w',
+    workspace,
+    { completionId: 'rec-w-completion', now: plusSeconds(T0, 21) },
+  ));
+  assert.equal(bornWaiter.deliveryState, 'claimed_waiter');
+  // 弃置的 late-waiter claim（claimed_at=T0+10）此刻同样过期，一并被回收认领；
+  // 断言按 created_at 排序的整批结果。
+  const claimedBatch = completions.claimPendingHook({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    claimId: 'fresh-hook',
+    now: plusSeconds(T0, 40),
+    leaseMs: 5_000,
+  });
+  assert.deepEqual(
+    claimedBatch.map((row) => row.completionId),
+    ['thread-rec-h-turn-rec-h-completion', 'rec-w-completion'],
+  );
+  assert.ok(claimedBatch.every((row) => row.deliveryState === 'claimed_hook' && row.claimId === 'fresh-hook'));
+});
+
+test('session-bounded claim recovery never touches other sessions or hosts', async (t) => {
+  const { store } = await openStore(t);
+  const completions = new CompletionStore(store);
+  const otherSession = insertProvenancedCompletion(store, {
+    threadId: 'thread-other',
+    turnId: 'turn-other',
+    sessionId: 'session-b',
+    now: plusSeconds(T0, 1),
+  });
+  completions.claimPendingHook({
+    host: 'kimi-code',
+    workspace: '/workspace/main',
+    sessionId: 'session-b',
+    claimId: 'other-claim',
+    now: plusSeconds(T0, 2),
+  });
+  const otherHost = insertProvenancedCompletion(store, {
+    threadId: 'thread-host-b',
+    turnId: 'turn-host-b',
+    host: 'zcode',
+    sessionId: 'session-b',
+    now: plusSeconds(T0, 3),
+  });
+  completions.claimPendingHook({
+    host: 'zcode',
+    workspace: '/workspace/main',
+    sessionId: 'session-b',
+    claimId: 'zcode-claim',
+    now: plusSeconds(T0, 4),
+  });
+
+  const recovered = completions.recoverExpiredClaims({
+    host: 'kimi-code',
+    workspace: '/workspace/main',
+    sessionId: 'session-a',
+    now: plusSeconds(T0, 60),
+    leaseMs: 5_000,
+  });
+  assert.equal(recovered, 0);
+  assert.equal(completions.getCompletion(otherSession.completionId).deliveryState, 'claimed_hook');
+  assert.equal(completions.getCompletion(otherHost.completionId).deliveryState, 'claimed_hook');
+
+  const recoveredB = completions.recoverExpiredClaims({
+    host: 'kimi-code',
+    workspace: '/workspace/main',
+    sessionId: 'session-b',
+    now: plusSeconds(T0, 61),
+    leaseMs: 5_000,
+  });
+  assert.equal(recoveredB, 1);
+  assert.equal(completions.getCompletion(otherSession.completionId).deliveryState, 'pending');
+  assert.equal(completions.getCompletion(otherHost.completionId).deliveryState, 'claimed_hook');
 });

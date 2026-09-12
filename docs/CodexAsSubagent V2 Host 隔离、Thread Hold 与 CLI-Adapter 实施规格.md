@@ -733,7 +733,7 @@ Host ≠ Server instance
 Host ≠ GUI window
 ```
 
-同时开启多个 Kimi Code（Kimi A / B / C）仍然都是 `host = kimi-code`，它们是同一个 Host 的多个 Session。CLI 型 Host 允许 N 个实例 / N 个 Session；Server 型 Host（一个 Server 承载多个 Session）在 V2 采用环境假设：**同一 Host 产品在当前 CAS 用户环境中同时最多只有一个 CAS-active Server Instance**——支持 1 Server / N Session，明确不支持多 Server 并存与路由（违反且可确认 >1 active Server 时报 `multiple_active_host_servers` 并 fail closed，恢复到唯一 Server 后自动恢复）。详见《Session 隔离与 Mailbox 架构设计》的环境假设章节。
+同时开启多个 Kimi Code（Kimi A / B / C）仍然都是 `host = kimi-code`，它们是同一个 Host 的多个 Session。CLI 型 Host 允许 N 个实例 / N 个 Session；Server 型 Host（一个 Server 承载多个 Session）在 V2 采用环境假设：**同一 Host 产品在当前 CAS 用户环境中同时最多只有一个 CAS-active Server Instance**——支持 1 Server / N Session，明确不支持多 Server 并存与路由（当前 V2 不为多 Server 场景定义错误面；该假设属环境约束，与 Session 级单活跃 interactive instance 的产品约束相区分）。详见《Session 隔离与 Mailbox 架构设计》的环境假设章节。
 
 ---
 
@@ -1045,7 +1045,7 @@ claimPendingHook({
 ```
 
 ```text
-reserveDirect({
+reserveWaiter({
     host,
     workspace,
     sessionId,
@@ -1082,25 +1082,26 @@ ACK/NACK 同样属于 Host Namespace。
 ```text
 delivery.ack {
     host,
-    deliveryId
+    claimId
 }
 ```
 
 ```text
 delivery.nack {
     host,
-    deliveryId
+    claimId
 }
 ```
 
-SQL：
+SQL（合法性条件 = delivery_state + claim_id 双条件；每次重新 claim 生成新 claim 代际）：
 
 ```text
 WHERE host = ?
-AND delivery_id = ?
+AND claim_id = ?
+AND delivery_state IN ('claimed_waiter', 'claimed_hook')
 ```
 
-不得只依赖 delivery UUID 的全局随机性作为授权边界。
+不得只依赖 claim id 的全局随机性作为授权边界；旧 claimant 的迟到 ACK/NACK 不得修改新 claimant 的状态。
 
 ---
 
@@ -1711,9 +1712,12 @@ detached worker
 worker registry
 SQLite polling
 kimi-code-web
+Runtime 内部事件驱动 Web delivery
+（2026-09-12 收口：连同 src/core/web-delivery.mjs /
+  src/core/kimi-web-client.mjs 及其测试一并删除归档）
 ```
 
-均属于未经本规格授权的 legacy implementation，只能作为 legacy code to remove / replace 处理。V2 正式入口固定为：
+均属于未经本规格授权的 legacy implementation，只能作为 legacy code to remove / replace 处理。当前 V2 的唯一主动 Mailbox delivery transport 是 Hook；Web Push 不进入当前版本，未来重做时不以旧实现为地基。V2 正式入口固定为：
 
 ```text
 serve
@@ -1722,7 +1726,7 @@ hook
 drain
 ```
 
-不得存在 `kimi-web` 作为第五套正式运行接口，不得保留常驻轮询 worker 架构，不得把 Web 回流需要的 Kimi Server 发现与投递能力暴露为公开 CLI 控制面（它们属于 Runtime 内部事件驱动 delivery 的实现细节）。禁止根据现有 legacy 代码反推产品设计；当前代码与规范冲突时，修改代码以符合规范。
+不得存在 `kimi-web` 作为第五套正式运行接口，不得保留常驻轮询 worker 架构，不得把任何 Web transport 能力暴露为公开 CLI 控制面。禁止根据现有 legacy 代码反推产品设计；当前代码与规范冲突时，修改代码以符合规范。
 
 ### 3.12 建议文件职责
 
@@ -1877,8 +1881,11 @@ Hook payload 缺 Session ID
 ```
 
 ```text
-错误 Host + 正确 deliveryId 执行 ACK
+错误 Host + 正确 claimId 执行 ACK
 → 不得 ACK
+
+旧 claimant 的迟到 ACK/NACK（claim 已更换后代际）
+→ 不得修改新 claimant 的状态
 ```
 
 ```text

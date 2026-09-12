@@ -780,7 +780,7 @@ test('CompletionRouter routes a reserved direct terminal result without holding 
     workspace,
     ownerInstanceId: 'router-instance',
   });
-  const reservation = executions.reserveDirect({
+  const reservation = executions.reserveWaiter({
     host: ROUTER_HOST,
     workspace,
     sessionId: ROUTER_SESSION,
@@ -799,7 +799,7 @@ test('CompletionRouter routes a reserved direct terminal result without holding 
     error: { code: 'upstream_error', message: 'bounded failure' },
     turn: { id: 'turn-router-direct', status: 'failed' },
   });
-  assert.equal(result.deliveryState, 'claimed_direct');
-  assert.equal(result.deliveryId, 'router-direct-delivery');
-  assert.equal(completions.ackDelivery({ host: ROUTER_HOST, deliveryId: result.deliveryId }).deliveryState, 'delivered');
+  assert.equal(result.deliveryState, 'claimed_waiter');
+  assert.equal(result.claimId, 'router-direct-delivery');
+  assert.equal(completions.ackDelivery({ host: ROUTER_HOST, claimId: result.claimId }).deliveryState, 'delivered');
 });

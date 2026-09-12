@@ -38,9 +38,9 @@ test('RuntimeServer routes correlated requests over newline-delimited Unix socke
       return { host: context.host, workspace: context.workspace, sessionId: 'session-A' };
     },
     async spawn(ctx, params) { calls.push(['spawn', ctx, params]); return { threadId: 't-1', status: 'running' }; },
-    deliveryIdFor() { return null; },
-    ackDeliveryId() { return false; },
-    releaseDeliveryId() { return false; },
+    claimIdFor() { return null; },
+    ackClaim() { return false; },
+    releaseClaim() { return false; },
   };
   const server = new RuntimeServer({ runtime, idleShutdownMs: 100_000 });
   try {
@@ -76,9 +76,9 @@ test('StdioBootstrap removes hidden delivery id and ACKs only after stdout write
       return { host: context.host, workspace: context.workspace, sessionId: 'session-A' };
     },
     async wait() { return { threadId: 't-1', status: 'completed' }; },
-    deliveryIdFor(value) { return value?.status === 'completed' ? 'delivery-1' : null; },
-    ackDeliveryId(id, host) { acked.push([id, host]); return true; },
-    releaseDeliveryId(id, host) { nacked.push([id, host]); return true; },
+    claimIdFor(value) { return value?.status === 'completed' ? 'delivery-1' : null; },
+    ackClaim(id, host) { acked.push([id, host]); return true; },
+    releaseClaim(id, host) { nacked.push([id, host]); return true; },
   };
   const server = new RuntimeServer({ runtime, idleShutdownMs: 100_000 });
   const output = new PassThrough();

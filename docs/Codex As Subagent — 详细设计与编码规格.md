@@ -2114,20 +2114,9 @@ rendered TerminalResult
 
 完全共用。
 
-没有 Hook 能力的 Host 仍可正常使用：
+Hook 缺失时的行为**不对所有 Host 做统一承诺**：它取决于该 Host 的 MCP 调用自身是否携带完整 SessionIdentity。例如 Kimi Code 属于 session-blind MCP Host，CAS 依赖 Hook 获得 native `session_id` 并建立 Session 路由，因此在没有 Hook 时 session-sensitive 的 MCP 调用可能合法失败为 `session_not_established`；未来自带完整 SessionIdentity 的 Host 可以有不同表现。wait/status 等工具的语义本身不因 Hook 缺失而改变，但 SessionContext 是否能建立由 Host 类型决定。
 
-```text
-wait
-wait_many
-status
-read_thread
-```
-
-只是失去后台 completion 自动注入体验。
-
-因此：
-
-> **Hook 是异步 Subagent 体验的重要组成部分，但不是 Runtime 正确性的前提。**
+> **Hook 是异步 Subagent 体验的重要组成部分；Runtime 是否在没有 Hook 时正常工作，是 per-Host 属性，不是跨 Host 全局性质。**
 
 ---
 

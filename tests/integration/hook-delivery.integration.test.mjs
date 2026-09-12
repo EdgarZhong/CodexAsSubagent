@@ -117,7 +117,7 @@ test('expired claimed Hook lease is requeued and delivered on a later drain', as
     host: HOST,
     workspace: harness.workspace,
     sessionId: SESSION,
-    deliveryId: 'crashed-hook',
+    claimId: 'crashed-hook',
     now: '2026-09-11T00:00:00.000Z',
   });
   assert.equal(firstClaim.length, 1);

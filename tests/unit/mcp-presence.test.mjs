@@ -121,7 +121,7 @@ test('a failed presence attach prevents the MCP processing loop entirely', async
 });
 
 test('run fails closed on unknown or missing host before any presence attach', async () => {
-  for (const host of ['kimi-code-web', null]) {
+  for (const host of ['unknown-host', null]) {
     const presence = createPresenceSpy();
     const bootstrap = new StdioBootstrap({
       socketPath: '/tmp/cas-presence-host.sock',
@@ -188,7 +188,7 @@ test('delivery.ack and stdout-failure delivery.nack carry the host from the forw
     connect: fakeSocketFactory((request) => {
       requests.push(request);
       if (request.method === 'runtime.wait') {
-        return { id: request.id, result: { threadId: 't-1', status: 'completed' }, deliveryId: 'delivery-9' };
+        return { id: request.id, result: { threadId: 't-1', status: 'completed' }, claimId: 'delivery-9' };
       }
       return { id: request.id, result: { acknowledged: true } };
     }),
@@ -199,7 +199,7 @@ test('delivery.ack and stdout-failure delivery.nack carry the host from the forw
   );
   assert.equal(response.result.threadId, 't-1');
   const ack = requests.find((request) => request.method === 'delivery.ack');
-  assert.equal(ack.params.deliveryId, 'delivery-9');
+  assert.equal(ack.params.claimId, 'delivery-9');
   assert.equal(ack.params.host, 'kimi-code');
   assert.equal(ack.context.host, 'kimi-code');
   await settle(2);
@@ -223,7 +223,7 @@ test('a stdout write failure NACKs the claimed delivery instead of letting the l
     connect: fakeSocketFactory((request) => {
       requests.push(request);
       if (request.method === 'runtime.wait') {
-        return { id: request.id, result: { threadId: 't-1', status: 'completed' }, deliveryId: 'delivery-77' };
+        return { id: request.id, result: { threadId: 't-1', status: 'completed' }, claimId: 'delivery-77' };
       }
       return { id: request.id, result: { acknowledged: true } };
     }),
@@ -237,7 +237,7 @@ test('a stdout write failure NACKs the claimed delivery instead of letting the l
   );
   const nack = requests.find((request) => request.method === 'delivery.nack');
   assert.ok(nack, 'write failure must send delivery.nack');
-  assert.equal(nack.params.deliveryId, 'delivery-77');
+  assert.equal(nack.params.claimId, 'delivery-77');
   assert.equal(nack.params.host, 'kimi-code');
   assert.equal(requests.some((request) => request.method === 'delivery.ack'), false, 'no ACK after a failed write');
 });

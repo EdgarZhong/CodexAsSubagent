@@ -132,14 +132,14 @@ test('waitMany all snapshots active threads and excludes a later spawn', async (
   assert.deepEqual(result.completed.map((entry) => entry.toJSON().threadId), [first.threadId]);
   assert.deepEqual(result.pending, []);
   assert.equal(result.timedOut, false);
-  assert.doesNotMatch(JSON.stringify(result), /turnId|deliveryId|workspace/);
+  assert.doesNotMatch(JSON.stringify(result), /turnId|claimId|workspace/);
   assert.ok(harness.executionOf(later.threadId, 'kimi-code'));
-  assert.equal(harness.completions.listCompletions({ host: 'kimi-code' })[0].deliveryState, 'claimed_direct');
-  await harness.runtime.ackDelivery(result, 'kimi-code');
+  assert.equal(harness.completions.listCompletions({ host: 'kimi-code' })[0].deliveryState, 'claimed_waiter');
+  await harness.runtime.ackClaim(harness.runtime.claimIdFor(result), 'kimi-code');
   assert.equal(harness.completions.listCompletions({ host: 'kimi-code' })[0].deliveryState, 'delivered');
 });
 
-test('waitMany keeps all completed rows claimed_direct until batch ACK and releases only unfinished reservations', async (t) => {
+test('waitMany keeps all completed rows claimed_waiter until batch ACK and releases only unfinished reservations', async (t) => {
   const harness = await setup(t, { waitTimeoutMs: 35 });
   const ctx = harness.contextFor('kimi-code');
   const a = await harness.runtime.spawn(ctx, { prompt: 'a' });
@@ -165,11 +165,11 @@ test('waitMany keeps all completed rows claimed_direct until batch ACK and relea
   assert.deepEqual(result.pending.map((entry) => entry.threadId), [c.threadId]);
   assert.equal(result.timedOut, true);
   const rows = harness.completions.listCompletions({ host: 'kimi-code' });
-  assert.deepEqual(rows.map((row) => row.deliveryState), ['claimed_direct', 'claimed_direct']);
+  assert.deepEqual(rows.map((row) => row.deliveryState), ['claimed_waiter', 'claimed_waiter']);
   assert.equal(harness.executionOf(c.threadId, 'kimi-code').reservationId, null);
-  const deliveryIds = new Set(rows.map((row) => row.deliveryId));
-  assert.equal(deliveryIds.size, 1);
-  await harness.runtime.ackDelivery(result, 'kimi-code');
+  const claimIds = new Set(rows.map((row) => row.claimId));
+  assert.equal(claimIds.size, 1);
+  await harness.runtime.ackClaim(harness.runtime.claimIdFor(result), 'kimi-code');
   assert.deepEqual(
     harness.completions.listCompletions({ host: 'kimi-code' }).map((row) => row.deliveryState),
     ['delivered', 'delivered'],

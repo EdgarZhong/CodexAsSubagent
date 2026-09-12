@@ -1,5 +1,5 @@
 function asStore(value) {
-  if (value && typeof value.createExecution === 'function' && typeof value.reserveDirect === 'function') {
+  if (value && typeof value.createExecution === 'function' && typeof value.reserveWaiter === 'function') {
     return value;
   }
   if (value?.store && typeof value.store.createExecution === 'function') return value.store;
@@ -15,8 +15,8 @@ export class ExecutionStore {
     return this.store.createExecution(input);
   }
 
-  reserveDirect(input = {}) {
-    return this.store.reserveDirect(input);
+  reserveWaiter(input = {}) {
+    return this.store.reserveWaiter(input);
   }
 
   releaseReservation(input = {}) {

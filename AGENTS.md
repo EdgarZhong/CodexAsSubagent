@@ -10,7 +10,7 @@
 - **`plugins/<host>/` 是各 Host 资源文件（MCP 注册、Hook 注册、manifest、说明）的唯一真源**。禁止手工编辑宿主（ZCode 等）的插件缓存或状态文件；任何对宿主可见的改动，都必须先改仓库源，再通过安装命令落到宿主。
 - threadId 是唯一公共 Subagent identity；turnId、event cursor、workspace、approval、raw events 和 delivery 内部字段不得泄漏到模型可见接口。
 - 模型不能指定 workspace/cwd；请求 workspace 必须由 Host 当前 canonical CWD 提供，无法获得或 realpath 不一致时 fail closed。
-- TerminalResult 必须先在 SQLite 中提交，再尝试 direct 或 Hook 交付；direct delivery 没有 ACK 不能标记 delivered。
+- TerminalResult 必须先在 SQLite 中提交，再尝试 waiter 或 Hook 交付；Terminal Initiate 按 waiter reservation 选择 Initial Transaction（出生 `claimed_waiter` 或 `pending`）；ACK/NACK/release 一律以 `delivery_state + claim_id` 双条件校验，没有匹配 ACK 不能标记 delivered。
 - wait 超时只结束本次等待，不 interrupt Codex；pending completion 不阻止 Runtime Server 自动退出。
 - changed-files attribution 只能来自当前 internal turn 的结构化记录、persisted patch/file-change、turn-scoped history 或 turn/diff notification，禁止用 repository-level Git diff/status。
 

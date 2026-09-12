@@ -165,7 +165,7 @@ export class RuntimeManager {
     this.settings = new Map();
     this.waiters = new Map();
     this.pendingTerminalEvents = new Map();
-    this.deliveryIds = new WeakMap();
+    this.claimIds = new WeakMap();
     this.locks = new Map();
     this.closed = false;
     this.stateChangeListeners = new Set();
@@ -385,14 +385,14 @@ export class RuntimeManager {
     return publicProjection(snapshot);
   }
 
-  #rememberDelivery(result, deliveryId) {
-    if (result && typeof result === 'object' && typeof deliveryId === 'string') {
-      this.deliveryIds.set(result, deliveryId);
+  #rememberClaim(result, claimId) {
+    if (result && typeof result === 'object' && typeof claimId === 'string') {
+      this.claimIds.set(result, claimId);
     }
     return result;
   }
 
-  #completionFor(threadId, session, deliveryId = undefined) {
+  #completionFor(threadId, session, claimId = undefined) {
     // Direct Wait 只能 claim 当前 SessionContext 归属的 completion（架构设计 §八）。
     const rows = this.completionStore.listCompletions({
       host: session.host,
@@ -400,9 +400,9 @@ export class RuntimeManager {
       sessionId: session.sessionId,
     });
     return rows.find((entry) => entry.threadId === threadId
-      && (deliveryId === undefined
-        ? entry.deliveryState === 'claimed_direct' || entry.deliveryState === 'pending'
-        : entry.deliveryId === deliveryId)) ?? null;
+      && (claimId === undefined
+        ? entry.deliveryState === 'claimed_waiter' || entry.deliveryState === 'pending'
+        : entry.claimId === claimId)) ?? null;
   }
 
   #notify(threadId) {
@@ -691,13 +691,13 @@ export class RuntimeManager {
     return this.#publicStatus(target.threadId, execution, target.metadata);
   }
 
-  async #reserve(threadId, session, deliveryId) {
-    const reservation = this.executionStore.reserveDirect({
+  async #reserve(threadId, session, claimId) {
+    const reservation = this.executionStore.reserveWaiter({
       host: session.host,
       workspace: session.workspace,
       sessionId: session.sessionId,
       threadId,
-      reservationId: deliveryId,
+      reservationId: claimId,
       now: isoNow(this.clock),
     });
     if (!reservation?.reserved) {
@@ -715,10 +715,10 @@ export class RuntimeManager {
     return reservation;
   }
 
-  async #waitForReservations(reservations, session, deliveryId, { timeoutMs = this.waitTimeoutMs } = {}) {
+  async #waitForReservations(reservations, session, claimId, { timeoutMs = this.waitTimeoutMs } = {}) {
     const threadIds = reservations.map((entry) => entry.threadId);
-    const done = () => threadIds.every((threadId) => this.#completionFor(threadId, session, deliveryId));
-    const collect = () => threadIds.map((threadId) => this.#completionFor(threadId, session, deliveryId));
+    const done = () => threadIds.every((threadId) => this.#completionFor(threadId, session, claimId));
+    const collect = () => threadIds.map((threadId) => this.#completionFor(threadId, session, claimId));
     const initial = collect();
     if (initial.every(Boolean)) return { completions: initial, timedOut: false };
 
@@ -728,7 +728,7 @@ export class RuntimeManager {
         timer: null,
         check: () => {
           for (const threadId of [...waiting]) {
-            if (this.#completionFor(threadId, session, deliveryId)) waiting.delete(threadId);
+            if (this.#completionFor(threadId, session, claimId)) waiting.delete(threadId);
           }
           if (waiting.size === 0) {
             cleanup();
@@ -762,18 +762,18 @@ export class RuntimeManager {
   async wait(ctx, threadId) {
     const session = await this.#session(ctx);
     const target = await this.#thread(ctx, threadId);
-    const deliveryId = randomUUID();
-    const reservation = await this.#reserve(target.threadId, session, deliveryId);
-    const waited = await this.#waitForReservations([reservation], session, deliveryId);
+    const claimId = randomUUID();
+    const reservation = await this.#reserve(target.threadId, session, claimId);
+    const waited = await this.#waitForReservations([reservation], session, claimId);
     const completion = waited.completions[0];
     if (completion) {
       const result = completionResult(completion);
-      if (result) return this.#rememberDelivery(result, deliveryId);
+      if (result) return this.#rememberClaim(result, claimId);
     }
     this.executionStore.releaseReservation({
       host: session.host,
       threadId: target.threadId,
-      reservationId: deliveryId,
+      reservationId: claimId,
     });
     const execution = this.executionStore.listExecutions({ host: session.host })
       .find((entry) => entry.threadId === target.threadId) ?? null;
@@ -799,15 +799,15 @@ export class RuntimeManager {
     if (ids.length === 0) return { completed: [], pending: [], timedOut: false };
     const targets = [];
     for (const id of ids) targets.push(await this.#thread(ctx, id));
-    const deliveryId = randomUUID();
+    const claimId = randomUUID();
     const reservations = [];
     try {
-      for (const target of targets) reservations.push(await this.#reserve(target.threadId, session, deliveryId));
+      for (const target of targets) reservations.push(await this.#reserve(target.threadId, session, claimId));
     } catch (error) {
-      this.executionStore.releaseReservation({ host: session.host, reservationId: deliveryId });
+      this.executionStore.releaseReservation({ host: session.host, reservationId: claimId });
       throw error;
     }
-    const waited = await this.#waitForReservations(reservations, session, deliveryId);
+    const waited = await this.#waitForReservations(reservations, session, claimId);
     const completed = [];
     const pending = [];
     for (let index = 0; index < targets.length; index += 1) {
@@ -815,7 +815,7 @@ export class RuntimeManager {
       if (completion) {
         const result = completionResult(completion);
         if (result) {
-          this.#rememberDelivery(result, deliveryId);
+          this.#rememberClaim(result, claimId);
           completed.push(result);
           continue;
         }
@@ -823,7 +823,7 @@ export class RuntimeManager {
       this.executionStore.releaseReservation({
         host: session.host,
         threadId: targets[index].threadId,
-        reservationId: deliveryId,
+        reservationId: claimId,
       });
       const execution = this.executionStore.listExecutions({ host: session.host })
         .find((entry) => entry.threadId === targets[index].threadId) ?? null;
@@ -834,32 +834,26 @@ export class RuntimeManager {
       pending,
       timedOut: waited.timedOut,
     };
-    this.#rememberDelivery(batch, deliveryId);
+    this.#rememberClaim(batch, claimId);
     return batch;
   }
 
-  async ackDelivery(value, host) {
-    const deliveryId = this.deliveryIds.get(value);
-    if (typeof deliveryId !== 'string') return false;
-    return this.ackDeliveryId(deliveryId, host);
+  // Runtime Server uses these bridges to keep claim ids out of the public API.
+  claimIdFor(value) {
+    return this.claimIds.get(value) ?? null;
   }
 
-  // Runtime Server uses these bridges to keep delivery ids out of the public API.
-  deliveryIdFor(value) {
-    return this.deliveryIds.get(value) ?? null;
-  }
-
-  ackDeliveryId(deliveryId, host) {
-    if (typeof deliveryId !== 'string' || deliveryId.length === 0) return false;
+  ackClaim(claimId, host) {
+    if (typeof claimId !== 'string' || claimId.length === 0) return false;
     if (typeof host !== 'string' || host.length === 0) throw new HostRequiredError();
-    const acknowledged = this.completionStore.ackDelivery({ host, deliveryId, now: isoNow(this.clock) });
+    const acknowledged = this.completionStore.ackDelivery({ host, claimId, now: isoNow(this.clock) });
     return Boolean(acknowledged?.acknowledged);
   }
 
-  releaseDeliveryId(deliveryId, host) {
-    if (typeof deliveryId !== 'string' || deliveryId.length === 0) return false;
+  releaseClaim(claimId, host) {
+    if (typeof claimId !== 'string' || claimId.length === 0) return false;
     if (typeof host !== 'string' || host.length === 0) throw new HostRequiredError();
-    const released = this.executionStore.releaseReservation({ host, reservationId: deliveryId });
+    const released = this.executionStore.releaseReservation({ host, reservationId: claimId });
     return Boolean(released?.released);
   }
 

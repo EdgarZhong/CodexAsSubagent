@@ -44,7 +44,7 @@ Host
    └─ Session C
 ```
 
-多 Server 并存（`Host → Server 1/2 → Sessions`）**明确超出 V2 范围**：不设计 server_instance_id、Session→Server mapping、Server namespace、Server ownership、Server takeover 与 multi-server route resolution。若能确认某 Server 型 Host 存在 >1 active Server，报 `multiple_active_host_servers` 并 fail closed，不得选第一个/最新/最后发现、不得"谁能 GET 到 Session 就选谁"、不得依次尝试；恢复到 exactly 1 active Server 后自动恢复。未来确有需要时，才把 `Host → Session` 正式扩展为 `Host → Server Instance → Session`，不在 V2 提前做半套。
+多 Server 并存（`Host → Server 1/2 → Sessions`）**明确超出 V2 范围**：不设计 server_instance_id、Session→Server mapping、Server namespace、Server ownership、Server takeover 与 multi-server route resolution，也不为 Web transport 保留错误面。与之区分的产品约束是：同一 `(host, workspace, session_id)` 同时只支持一个活跃 interactive instance，这是 Session 级单实例约束，由 Host 产品侧保证，不依赖 transport 错误面。未来确有需要时，才把 `Host → Session` 正式扩展为 `Host → Server Instance → Session`，不在 V2 提前做半套。
 
 内部涉及 Host 隔离的状态均以：
 
@@ -774,8 +774,8 @@ terminal_status
 payload
 
 delivery_state
-delivery_id
-delivery_started_at
+claim_id
+claimed_at
 delivered_at
 created_at
 ```
@@ -812,7 +812,10 @@ Execution terminal
 BEGIN TRANSACTION
       ↓
 INSERT Mailbox row
-并继承 Execution.session_id
+并继承 Execution 的 (host, workspace, session_id)
+
+初始 delivery_state 按 §九 Terminal Initiate 分支选择：
+terminal 前已有 waiter reservation → claimed_waiter；否则 → pending
 
 同时
 
@@ -935,9 +938,9 @@ current_session = B
 
 A 仍可以通过自己的 Hook 收到之前留下的 pending Completion。
 
-### Direct Wait
+### Waiter Claim
 
-弱 Host 的 MCP request 不携带 Session ID，因此 Direct Wait 使用 Runtime 当前已经建立的 SessionContext。
+弱 Host 的 MCP request 不携带 Session ID，因此 waiter claim 使用 Runtime 当前已经建立的 SessionContext。
 
 若：
 
@@ -955,7 +958,7 @@ session_id = B
 
 对应的 Mailbox record。
 
-因此 B 不会把 A 留下的 pending Completion claim 成自己的 direct result。
+因此 B 不会把 A 留下的 pending Completion claim 成自己的 waiter 结果。
 
 ### Runtime-independent 回流
 
@@ -996,44 +999,73 @@ SQLite Mailbox
 
 ---
 
-## 九、Mailbox 的动态维度：Delivery 状态与投递竞争
+## 九、Mailbox 的动态维度：claim 状态与投递竞争
 
-Mailbox 的 `delivery_state` 独立描述一条 Completion 当前由哪种投递路径占用。
+Mailbox 的 `delivery_state` 独立描述一条 Completion 当前由谁拥有消费权。
 
-状态保持现有模型：
+状态收口为四态：
 
 ```text
 pending
-claimed_direct
+claimed_waiter
 claimed_hook
 delivered
 ```
 
-其基本竞争关系为：
+语义：
 
 ```text
-                 wait claim
-             ┌──────────────→ claimed_direct
+pending        = Completion 已经 durable，但当前无人拥有消费权
+claimed_waiter = 消费权由 waiter 持有（不区分 waiter 建立于 terminal 前后）
+claimed_hook   = 某次 Hook invocation 已经获得消费权
+delivered      = 已确认完成消费
+```
+
+每条 claim 记录三个字段：
+
+```text
+claim_id     = 本次 claim 的唯一代际，每次重新 claim 生成新值
+claimed_at   = claim 取得时间，同时是过期回收的时间基准
+delivered_at = ACK 成功时间
+```
+
+所有 ACK、NACK、release 都必须以：
+
+```text
+delivery_state
++
+claim_id
+```
+
+共同作为合法性条件。旧 claimant 的迟到 ACK/NACK 不得修改新 claimant 的状态。
+
+当前 V2 的唯一主动 delivery transport 是 Hook。竞争关系为：
+
+```text
+                 waiter claim
+             ┌──────────────→ claimed_waiter
              │
 pending ─────┤
              │
              └──────────────→ claimed_hook
-                 Hook/Web claim
+                 Hook claim
 ```
 
 成功投递并 ACK：
 
 ```text
-claimed_direct ─┐
+claimed_waiter ─┐
                 ├→ delivered
 claimed_hook ───┘
 ```
 
-claim 失效或投递未完成时，可以重新回到：
+claim 失效、投递未完成或被明确释放时，记录回到：
 
 ```text
 pending
 ```
+
+并参加下一次投递竞争。
 
 整个过程中：
 
@@ -1041,21 +1073,82 @@ pending
 session_id
 ```
 
-保持不变。
-
-因此：
+保持不变。因此：
 
 ```text
 session_id
 = Completion 的静态目标 Session
 
 delivery_state
-= Completion 当前的动态投递占用状态
+= Completion 当前的动态消费权占用状态
 ```
 
 这两个字段在数据模型上完全正交。
 
-### 单 Completion 的唯一投递权
+### Terminal Initiate：统一分支模型
+
+Terminal 不是"直接 INSERT pending"的特殊流程，而是统一的分支模型：
+
+```text
+Execution terminal
+      ↓
+evaluate terminal-init condition（是否已有 waiter reservation）
+      ↓
+select Initial Transaction
+      ↓
+COMMIT durable Completion
+      ↓
+之后消费者再工作
+```
+
+当前 V2 只有两个 Initial Transaction 分支：
+
+```text
+Terminal Initiate
+├─ waiter reserved（terminal 前已有 reservation）
+│    → InitialTransaction.Waiter
+│    → Completion 初始状态 = claimed_waiter
+│
+└─ otherwise
+     → InitialTransaction.Normal
+     → Completion 初始状态 = pending
+```
+
+Waiter Initial Transaction：
+
+```text
+BEGIN
+INSERT completion（provenance 继承自 Execution）
+  delivery_state = claimed_waiter
+  claim_id = reservation id（首个 claim 代际）
+  claimed_at = now
+terminalize / remove execution
+consume / associate waiter reservation
+COMMIT
+```
+
+Normal Initial Transaction：
+
+```text
+BEGIN
+INSERT completion
+  delivery_state = pending
+terminalize / remove execution
+COMMIT
+```
+
+waiter return 与 Hook injection 都是外部 side effect，一律发生在 COMMIT 之后；数据库事务不得跨越真实投递。
+
+原则始终是：
+
+```text
+durable truth first
+external delivery second
+```
+
+未来若增加其他 delivery transport，扩展的是这里的分支选择，而不是推翻 Terminal Initiate 模型。
+
+### 单 Completion 的唯一消费权
 
 每一条：
 
@@ -1063,31 +1156,24 @@ delivery_state
 (thread_id, turn_id)
 ```
 
-对应的 Completion，在任意时刻只能存在一个有效 Delivery Claim。
+对应的 Completion，在任意时刻只能存在一个有效 claim。
 
 因此：
 
 ```text
-pending → claimed_direct
-```
-
-和：
-
-```text
+pending → claimed_waiter
 pending → claimed_hook
 ```
 
-必须通过原子 claim 竞争。
+必须通过原子 claim 竞争（WHERE delivery_state = 'pending' 的 CAS UPDATE）。
 
-如果 Direct Wait 已经成功 claim：
+如果 waiter 已经成功 claim 为：
 
 ```text
-claimed_direct
+claimed_waiter
 ```
 
-Hook/Web 就不能同时获得同一 Completion。
-
-反之亦然。
+Hook 就不能同时获得同一 Completion。反之亦然。
 
 只有当前 claim 失败、过期或被明确释放以后，记录才允许重新进入：
 
@@ -1099,7 +1185,7 @@ pending
 
 ### ACK
 
-Claim 只代表某条 Delivery Path 暂时取得投递权，不代表结果已经成功交付。
+Claim 只代表某条投递路径暂时取得消费权，不代表结果已经成功交付。
 
 真正完成需要 ACK：
 
@@ -1108,16 +1194,19 @@ claim
 ↓
 delivery
 ↓
-ACK
+ACK（校验 delivery_state + claim_id）
 ↓
 delivered
 ```
 
-如果没有收到可靠 ACK，则不能永久认为该 Completion 已经完成投递。
+如果没有收到可靠 ACK，则不能永久认为该 Completion 已经完成投递。投递失败或合法恢复时：
 
-这保证一个 Turn 的最终结果只有一个有效投递槽位，同时仍然允许投递失败后的恢复。
+```text
+claimed_hook + matching claim_id → pending
+claimed_waiter + matching claim_id → pending
+```
 
-### Wait 在 terminal 之后到达
+### Waiter 在 terminal 之后到达
 
 Execution 已经 terminal：
 
@@ -1128,39 +1217,61 @@ Mailbox {
 }
 ```
 
-之后 Session A 的 `wait` 可以原子完成：
+之后 Session A 的 `wait` 通过正常 CAS claim 原子完成：
 
 ```text
-pending → claimed_direct
+pending → claimed_waiter（新 claim 代际）
 ```
 
-所以 `pending` 并不表示“这个结果已经决定走主动回流”。
+所以 `pending` 并不表示"这个结果已经决定走主动回流"。
 
 它只表示：
 
-> 当前还没有任何投递路径 claim 这条 Completion。
+> 当前还没有任何消费者 claim 这条 Completion。
 
-### Wait 在 terminal 之前到达
+### Waiter 在 terminal 之前到达
 
-如果 Execution 仍在运行时已经有 Direct Wait 建立 reservation：
+如果 Execution 仍在运行时 waiter 已经建立 reservation：
 
 ```text
 Execution(T1,U1)
-reservation = direct
+reservation = waiter
 ```
 
-那么 terminal 时仍然产生同一条 Mailbox record，只是初始状态直接成为：
+那么 terminal 走 Waiter Initial Transaction，Mailbox record 初始状态直接是：
 
 ```text
 Mailbox(T1,U1) {
     session_id = A
-    delivery_state = claimed_direct
+    delivery_state = claimed_waiter
+    claim_id = reservation id
 }
 ```
 
-因此无论 Direct Wait 什么时候出现，所有 terminal result 始终进入同一个 Mailbox。
+因此无论 waiter 什么时候出现，所有 terminal result 始终进入同一个 Mailbox。
 
-不存在“入 Mailbox 之前按投递方式分流”的第二套路径。
+不存在"入 Mailbox 之前按投递方式分流"的第二套路径。
+
+### claim 层过期回收（孤儿恢复）
+
+claim 持有方可能异常消失（Hook 短进程被杀、Runtime 崩溃前的 waiter claim）。恢复机制是 claim 层的通用机制，不设 Runtime 启动 sweep：
+
+```text
+before consumer claim
+→ recover expired claims
+→ then CAS claim
+```
+
+- Hook claim（`claimPendingHook`）：按 session 有界回收；
+- waiter claim（`reserveWaiter`）：按 thread 有界回收；
+- 基准字段统一为 `claimed_at`，lease 默认 30s；
+- `claimed_at + lease < now` 的 `claimed_waiter`/`claimed_hook` 回收为 pending，随后由本次消费者 CAS 认领。
+
+因此 waiter claimant 死亡后，后来的 Hook drain 可以恢复认领；Hook claimant 死亡后，即使没有新的 Hook event，后来的 wait 也不会被旧 claim 永久卡住。
+
+### 多 transport 扩展原则（仅原则，当前无机制）
+
+Mailbox 的 durable state 是唯一事实源。若未来增加第二种主动回流 transport，不应通过动态修改 Host 安装状态与现有 transport 协调，而应通过数据库 eligibility/View 和统一的 atomic claim ownership 做隔离：每条 transport 只看属于自己的 candidate set，并最终统一竞争 \`pending → claimed_x\`，保证同一个 Completion 只能由一个消费者拥有。当前不为此保留任何 capability registry、delivery profile、push table、worker、retry 或 cache gate 机制。
 
 ---
 
@@ -1183,10 +1294,8 @@ Mailbox(T1,U1) {
 | stale Thread Hold 且无 active Execution | **不是错误** | Presence + Execution | `send` lazy takeover |
 | Thread Hold 与唯一 active Execution.host 不一致 | 自动修复 Hold | active Execution | 当次事务修正 |
 | 同一 Thread 出现不同 Host 的冲突 active Execution | Thread fail closed | active Executions | Execution 集合重新收敛 |
-| Server 型 Host 没有 active Server | 不执行 Web push | Server availability | 唯一 Server 出现后恢复 |
-| Server 型 Host 出现多个 active Server | `multiple_active_host_servers` | Server availability | 恢复到唯一 Server |
 | 未知 Host | 拒绝调用 | Host Registry | 使用合法 Host ID |
-| delivery claim 进程异常消失 | 暂时不可重新领取 | delivery lease | lease expiry 后 requeue |
+| claim 持有方进程异常消失 | 暂时不可重新领取 | `claim_id` + `claimed_at` | 下一次消费者 claim 前按 lease 回收（claim 层通用恢复，无启动 sweep） |
 
 ### Conflict 尽量是派生状态
 
