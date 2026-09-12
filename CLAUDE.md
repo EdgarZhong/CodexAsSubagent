@@ -2,115 +2,73 @@
 
 ## 当前阶段
 
-- 目标：按 docs/Codex As Subagent — 详细设计与编码规格.md 自主交付尽可能完整的 V1，并形成可运行、可测试、可继续演进的 Git 仓库。
-- 阶段：Task 1-8 已完成；V1 验收完成；ZCode 插件协议已按真实 bundle 取证修复；真实 Codex app-server E2E（spawn/wait/status，gpt-5.6-luna 真实模型调用）已于 2026-09-11 通过，见 docs/autonomous-runs/20260911-1206-real-codex-e2e.md。插件已用标准 ZCode marketplace 方式装入本机并启用，MCP bootstrap 由 ZCode GUI 会话拉起（进程链 `node src/cli/main.mjs mcp` ← `zcode-cli` ← `zcode-host-local-1`）。2026-09-11 真实插件路径实测暴露并修复 4 处缺陷，Hook 回流端到端打通，见 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md。同日完成十工具真实会话 E2E、Server 冷启动 runtime 自动发现、第 5 处缺陷（turn 终止通知复用）修复、跨客户端锁错误规范化，见 docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md。随后完成 Kimi Code TUI/Web 插件资源、Web sidecar、CLI 安装器、共享 completion lease/ACK 集成、`config.toml` 增量覆写、只读 `doctor` 诊断与全量源文件语法检查；当前确定性回归为 137/137，真实 Kimi Web E2E 需本机 live session 且本轮未越权创建。
-- 待完成/明确不做项见「任务看板」的 Backlog 与「明确不做（V1 决定）」两节；本行不再重复枚举。
-- 基线：2026-09-11，已完成 Git 分支、package manifest、CLI/共享常量、源码与测试目录骨架及 pinned Submodule。
-- 默认裁决：使用 Node.js ESM 与内置 node:sqlite；以 fake/in-memory Supervisor Adapter 支撑确定性单元测试，同时保留真实上游 Adapter 接口。
+- 目标：按三份 V2 规格文档完成 V2 升级（Host/Session 隔离、Thread Hold、Runtime 内部事件驱动 Web delivery）与 Kimi Code 适配；ZCode 插件资源与真实 E2E 明确推后。
+- 权威规格（冲突时以此为准，均为 2026-09-12 修订后的唯一自洽版本）：
+  1. `docs/CodexAsSubagent V2 Session 隔离与 Mailbox 架构设计.md`
+  2. `docs/CodexAsSubagent V2 串投修复与 Kimi Code 集成适配说明.md`
+  3. `docs/CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格.md`
+- V1 详细设计已降级为基线规格（`docs/Codex As Subagent — 详细设计与编码规格.md`，被取代小节已移除）；V1 已全部交付并通过用户级验收，证据见 docs/autonomous-runs/。
+- 执行方式（用户 2026-09-12 指令）：自主实现流程中**独立 Review Agent 取消**，全部复核与验收由主会话承担；subagent 只负责必要的 explore 与实现；使用 ZCode 原生子代理，不使用 Codex。
+- 环境事实：本机 Codex runtime 为 ChatGPT.app 内嵌 0.153.4；确定性回归基线为 V1 末期 149/149（V2 改造后以新全量为准）。
 
-## 任务看板
+## V2 任务看板
 
-- [x] 通读详细设计，提取 V1 固定契约、目录结构、关键测试和核心不变量。
-- [x] 创建 README.md、AGENTS.md、CLAUDE.md，明确三者职责。
-- [x] 初始化 Git 分支与 .gitignore，固定上游 codex-supervisor-mcp Submodule。
-- [x] 建立 package/CLI/源码目录和共享协议常量。
-- [x] 实现 Supervisor Adapter、WorkspaceGuard、SQLite StateStore。
-- [x] 实现 TerminalResult、CompletionRouter、双消费者 delivery 与 RuntimeManager 控制路径。
-- [x] 实现 Unix Socket Runtime Server、stdio Bootstrap、lazy start、startup lock、idle shutdown 与 recovery。
-- [x] 注册并实现十个 MCP 工具的稳定 schema 与 compact response projection，并接通 MCP JSON-RPC stdio façade。
-- [x] 实现 Hook drain、lease 恢复和 Host wrapper；补齐 ZCode 插件配置。
-- [x] 完成 unit/integration/smoke 回归、主 Agent 需求审查和用户级验收记录；真实外部 E2E 限制已明确记录。
-- [x] 自主执行 git commit；不执行 push、发布或跨工作区合并。
-- [x] 以标准 marketplace 方式把 ZCode 插件装入本机、启用，并确认 GUI 会话拉起 MCP bootstrap。
-- [x] 真实插件路径实测并修复 4 处缺陷（--data-dir 透传、adapter 未终止 app-server、idle shutdown 未触发、Hook 参数解析导致输出非 JSON）；Hook 回流端到端打通。
-- [x] 实现 Server 冷启动 Codex runtime 自动发现（设计 6.4）。
-- [x] 十工具真实 ZCode 会话 E2E；发现并修复第 5 处缺陷（turn 终止通知复用导致 interrupted/failed 不落 terminal）；PostToolUse 中途回流实证。
-- [x] 跨客户端线程锁错误规范化为 `thread_locked`（只规范化此一已知原因，其余上游错误原样透传）。
-- [x] 完成 Kimi Code 干净插件资源、TUI `PreToolUse`/`Stop`/`UserPromptSubmit` 回流 envelope 与 block 语义。
-- [x] 完成 Kimi Web sidecar：实例/session/workspace discovery、官方 prompt/steer API、K2.7 固定模型、幂等 prompt、completion lease/ACK 与安全 attach/detach registry。
-- [x] 完成 `install --host=kimi-code`、dry-run、托管副本命令本地化、原子 `installed.json` 与 `.bak-cas` 备份，并加入 marketplace。
-- [x] 完成 Kimi Code 确定性单元/SQLite 集成验收；真实 Kimi Web Server E2E 因本机 live session/token 未具备而记录为遗留风险。
-- [x] 完成 `~/.codex-as-subagent/config.toml` 可选增量覆写：平面键/table 前缀解析、`-c key=value` 注入 `app-server` 前、缺失文件不改参数、格式错误 fail-closed。
-- [x] 完成只读 `doctor` 诊断命令，并将 `npm run lint` 扩展为覆盖全部 `src/**/*.mjs` 的 Node 语法检查。
-- [x] 创建 GitHub 私有远端仓库 EdgarZhong/CodexAsSubagent（origin，默认分支 main），`codex/autonomous-v1` 全量 47 提交以 fast-forward 合并至 main 并推送（2026-09-11，用户授权；远端暂只有 main 分支）。
-- [x] Kimi 插件 MCP 工具暴露修复（2026-09-11）：manifest command 硬校验只允许裸命令或 `./` 相对插件根，旧安装器写 node 绝对路径导致 server 被宿主静默丢弃；改为插件内 launcher `bin/cas-run`，真实重装后十工具在 Web 会话全部暴露。
-- [x] 十工具真实 Kimi Web 会话实测（2026-09-11）：spawn/status/wait/steer/interrupt/send/wait_many/read_thread/list_threads/models 全部走通真实 gpt-5.6-luna；两处待对照规格（wait_many 对已消费线程报 `no_active_turn`、read_thread `status:"unknown"`）。
-- [x] MCP workspace 错配修复（2026-09-11 晚，方案 A 落地）：插件 manifest 不再携带 `mcpServers`，安装器把 MCP 注册到用户级 `~/.kimi-code/mcp.json`（宿主以 workspace.cwd 拉起用户级 stdio MCP，二进制 0.42.0 取证证实）；移除 launcher；bootstrap 检测 cwd 落在 `KIMI_PLUGIN_ROOT` 内 fail-closed。全量回归 149/149，真实 `install` 产物核对通过。
-- [ ] **Kimi Web 模式 E2E 复验（唯一遗留，留给用户在 Kimi Code 执行）**：重启宿主/新开会话 → `lsof -p <MCP pid>` 验证 MCP cwd=workspace → spawn 探针不调 wait 观察 `<codex-completion>` 插队注入 → SQLite 确认 `delivery_state='delivered'` 且 `delivery_id` 带 `kimi-web-` 前缀。SOP 见 docs/autonomous-runs/20260911-1824-kimi-web-e2e-handoff.md §5 与 docs/autonomous-runs/20260911-2100-kimi-web-workspace-mismatch-fix.md。
+- [x] 三份 V2 规格按最终修订指令合并为唯一自洽版本（含 `current_session` 持久化、破坏性重建、Runtime 内部 Web delivery、Fail-Closed/Recovery Matrix、Host 产品定义；Doc A 改名去 "(1)"）。
+- [x] V1 详细设计精简为基线规格；Kimi 知识库加 V2 状态标注；三份核心文档同步。
+- [ ] T1 SQLite V2 schema 重建与 Host-scope Store API（executions/completions + host/session_id，thread_holds、host_presence、current_sessions；claim/ack/nack/gate 全谓词 host 化）。
+- [ ] T2 Runtime core 隔离逻辑（spawn/send Hold 算法、thread_held、steer/interrupt/wait/status/read_thread/list_threads 门禁、session_not_established、Recovery §2.10/§3.2）。
+- [ ] T3 Host Protocol Registry + CLI 协议（src/hosts/{registry,kimi-code,zcode}；hook `--host` 必填、drain 三参必填、mcp `--host` 必填 + Presence heartbeat）。
+- [ ] T4 Kimi Web 事件驱动投递（terminal COMMIT → claim → push → ACK/NACK/lease；单 active Server 假设；移除 legacy kimi-web CLI/worker/registry）。
+- [ ] T5 Kimi 插件资源与安装器更新（attach/detach hook 移除、MCP 注册带 `--host=kimi-code`）。
+- [ ] 主会话集成复核、全量回归（npm test / lint / smoke）、验收记录写入 docs/autonomous-runs/。
+- [ ] 用户级验收：真实 Kimi TUI/Web E2E 由用户执行（同 V1 惯例）；ZCode 插件集成与 E2E 单独一轮。
 
-### Backlog（V1 未完成项，按优先级）
+### Backlog（承接 V1 未完成项）
 
-- [ ] **三层隔离补齐（host / workspace / session），优先于其他 Backlog**：V1 只做了 workspace 一层。Kimi Web 已实测 session 串投（completion 投进同 workspace 旧会话）；**ZCode 同款串投亦已复现**（两个真实 ZCode 会话并发，A 存活期间其 completion 仍进 B、A 未收到）。另观察到跨 Host 抢占：两 Host 共享同一 SQLite 与单实例 Server，Kimi 残留 worker 可领走 ZCode 的 completion。需：(a) 取消/替换 Web 的 detached 常驻轮询 worker，回到设计定稿 §5.1 的**事件驱动 push**；(b) 引入 host 维度隔离（当前单实例 Server 与全局 SQLite 服务所有 Host，`claimPendingHook` 的 `host` 参数未被使用）；(c) 引入 session 归属并按其过滤投递。**方案待用户与更强模型讨论后定稿，未定稿前不动手**。取证见 docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md。
+- [ ] `tests/e2e/`、`tests/fixtures/` 空占位：缺可重复执行的自动化 E2E。
+- [ ] 开源一键安装在 Host 子进程 PATH 的发现方案（ZCode 插件 update 重同步覆盖命令本地化）。
+- [ ] 真实 `status=failed` turn 路径未单独构造验证。
 
-- [ ] **开源一键安装在 Host 子进程 PATH 的发现方案**：安装后若 ZCode 插件 update 从源目录重同步，会把本地化命令覆盖回裸命令 `codex-as-subagent`，而 GUI 子进程 PATH 未必含它 → MCP 工具消失。解法：命令走可发现路径，或改用 `node` + 解析后的绝对路径。
-- [ ] **`tests/e2e`、`tests/fixtures` 为空占位**：真实端到端目前仅靠 `docs/autonomous-runs/` 手工路径，缺可重复执行的自动化 E2E。
-- [ ] **真实 `status=failed` 的 turn 路径未单独构造验证**：当前仅经 recovery 合成 failed 验证过（interrupted 已真机验证）。
-- [x] **真实 ZCode `UserPromptSubmit` 事件端到端注入已实证（2026-09-11）**：headless 会话 B 的 rollout 中，`UserPromptSubmit` 的 additionalContext 真实携带了 pending completion 的渲染文本（`Codex subagent 01a09102-… completed (d488ba71)`），非仅 wrapper 输出形态。Stop 与 PostToolUse 此前已真机验证。
-- [x] **MCP server 不注入 `ZCODE_SESSION_ID`（2026-09-11 实测确认）**：ZCode 会话的 MCP 进程 env 只有 `ZCODE_APP_VERSION`/`ZCODE_BASE_URL`/`ZCODE_PROJECT_DIR`/`ZCODE_PLUGIN_*`/`ZCODE_PROCESS_LABEL` 等，**无 `ZCODE_SESSION_ID`**（`ps eww -p <mcp-pid>` 实测）；session 身份只在 Hook env 中出现。故 session 隔离的归属取数必须走 Hook 通道，与 Kimi 侧结论一致。
-- [ ] **session 级隔离（V2）**：设计 6.2 末尾，V1 前提是单 workspace 单主会话。
-- [ ] **真实 Kimi Web Server E2E**：工具暴露与十工具实测已于 2026-09-11 完成；Web 主动回流的 workspace 错配已修复（决策 20），仅剩用户在 Kimi Code 内的 E2E 复验，SOP 见 docs/autonomous-runs/20260911-2100-kimi-web-workspace-mismatch-fix.md。
+### 明确不做（V2 决定，非遗漏）
 
-### 明确不做（V1 决定，非遗漏）
+- **多 Server 路由**：Server 型 Host 假设同一产品至多一个 active Server；>1 报 `multiple_active_host_servers` fail closed。未来需要时才扩展 `Host → Server Instance → Session`。
+- **V1→V2 数据迁移**：不做 migration，不保留旧 CAS runtime state（含 delivered history），不实现 `.bak-v1` 自动备份。
+- **不做线程锁探测**；`thread_locked` 仅覆盖 "already has an active writer" 归一（V1 决定继续有效）。
+- **不新增 Hook 事件**：仍固定 `UserPromptSubmit` + `PostToolUse` + `Stop`（ZCode）；Kimi 为 `PreToolUse` + `Stop` + `UserPromptSubmit`。
+- **MCP public API 不增加**：V2 不改 10 个工具的 names、input schema、业务语义与调用方式；Host/Session 隔离属于内部 Runtime context，不进入模型可见 MCP 参数。
+- **Hook 不做重活 / 不以 PID 相等清 orphan app-server**（AGENTS.md，继续有效）。
 
-- **不做线程锁探测**：不实现"探测 `~/.codex/thread-writer-locks/` 并在 `thread/list` 标记被占用"（用户 2026-09-11 拍板）。理由：协议层无锁字段；本地 flock 探测无法区分"自己持有 vs 他人持有"，会误报自家可用线程。跨客户端锁争用作为 V1 使用前提接受（同机同 `~/.codex` 时避免多客户端并用），仅将其错误规范化为 `thread_locked`。
-- **不新增 Hook 事件**：`PreToolUse`/`PermissionRequest`/`PostToolUseFailure` 无回流语义，`SessionStart` 时机过早；固定 `UserPromptSubmit` + `PostToolUse` + `Stop`（决策 15）。
-- **不加 `stop_hook_active` 护栏**：claim→ack 在同一瞬间清除 pending，构造上无法套娃，加护栏反而掐掉合法投递（决策 15）。
-- **session 级隔离推迟到 V2**（决策 8）。
-- **MCP public API 不增加** cwd/workspace/sandbox/approval/event cursor/raw event/generic Codex config 编辑能力（AGENTS.md）。
-- **Hook 不做重活**：不把 Hook 变 MCP tool，不让 Hook 启动/恢复/中断 thread，不让 Bootstrap 持有 Runtime 或 SQLite 业务状态（AGENTS.md）。
-- **不通过 PID 相等清理 orphan app-server**：必须能高置信证明归属当前旧实例（AGENTS.md）。
+## 继承决策（V1 定稿、V2 继续有效）
 
-## 当前动态决策
+1. 技术栈：Node.js 24 ESM + node:sqlite；vendor/codex-supervisor-mcp 以 Submodule 固定，业务代码只经 src/adapters/supervisor/ 访问。
+2. MCP transport：stdio Bootstrap + Unix socket Runtime 分层；最小 JSON-RPC façade；Bootstrap 不持有 Runtime/SQLite 业务状态。
+3. Runtime 自动发现：`CODEX_BIN` > PATH > standalone managed > `~/.local/bin` > Homebrew > ChatGPT.app > 旧 Codex.app；realpath 去重 + `--version` + schema method 检查 + ephemeral initialize 冒烟；单生命周期不切换 binary。实现于 `src/shared/codex-runtime.mjs`。
+4. 配置分层：`~/.codex-as-subagent/config.toml` 是对 Codex 配置的可选增量覆写（`-c key=value` 注入 app-server 前）；Codex 二进制走 `CODEX_BIN` env，不写 config.toml。实现于 `src/shared/codex-runtime.mjs` + `src/cli/serve.mjs`。
+5. 兼容性事实：app-server 必须始终显式设置 `CODEX_APP_SERVER_ARGS`（至少 `["app-server"]`）；`turn/completed` 通知复用承载 completed/interrupted/failed（以 canonical turn record status 细分）。
+6. 错误规范化：仅 `already has an active writer` → `thread_locked`（Codex writer-lock 层）；V2 新增 `thread_held`（CAS Host Hold 层，含 `data.holderHost`），两层严格分离，不得合并或把 Codex 表示成 holder。
+7. 回流事件：ZCode 固定 UserPromptSubmit/PostToolUse/Stop；PostToolUse 省略 matcher 匹配所有工具、不接受 decision；Stop 以 `decision:block` 续轮；不加 `stop_hook_active` 护栏；双通道经 claim 状态互斥。
+8. ZCode Hook 协议事实（逆向取证）：恰好 7 事件；stdout 必须以 `{` 开头严格 JSON；Hook env 注入 `ZCODE_SESSION_ID`（session 身份只在 Hook 通道可得）；MCP 进程 env 无 session 变量。取证见 docs/research/2026-09-11-zcode-hook-protocol.md。
+9. Kimi Hook 协议事实：stdin JSON `{hook_event_name, session_id, cwd, ...}`（session_id 只在 stdin 字段）；exit 0 allow / exit 2 block；仅 PreToolUse/Stop/UserPromptSubmit 可影响主流程；Hook 对 MCP 工具调用也触发。协议依据见 Kimi 知识库（协议事实部分仍有效）。
+10. 插件安装：`plugins/<host>/` 是唯一真源，安装器拷贝+本地化+注册；Kimi MCP 注册到用户级 `$KIMI_CODE_HOME/mcp.json`（宿主以 workspace cwd 拉起），插件 manifest 禁止携带 MCP；K2.7 模型 `kimi-code/kimi-for-coding` 固定用于 Web 投递。
+11. V1 串投取证（已由 V2 结构性修复）：host 谓词缺失、session 维度缺失、detached worker 孤儿化；证据见 docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md。
 
-1. Runtime 技术栈：选用 Node.js 24 ESM + node:sqlite，避免 V1 为数据库引入额外 native 依赖；代价是 Node 版本要求提升到 24+。
-2. 上游接入：主仓库通过 vendor/codex-supervisor-mcp 固定 Submodule；业务代码只依赖 Adapter 的稳定接口，测试默认使用 fake adapter，避免依赖本机 Codex session 才能跑通回归。
-3. MCP transport：V1 保持 stdio Bootstrap 与 Unix socket Runtime 的分层；若 MCP SDK 引入量过大，先用最小 JSON-RPC/MCP 兼容实现，接口行为与工具 schema 优先。
-4. 不确定项处理：详细设计没有锁定上游具体 commit、Host Hook stdin/additionalContext 协议细节、Codex app-server 当前 wire schema 和 dedicated profile 安装方式；本轮先提供可替换 Adapter、Host wrapper 配置和明确错误边界，并在最终报告列出待确认项。
-5. MCP façade：使用最小 JSON-lines JSON-RPC 实现 `initialize`、`tools/list`、`tools/call`、`ping` 和通知；业务错误以 `isError` content 返回，协议级未知方法保持 JSON-RPC 错误；Bootstrap 不持有 Runtime/SQLite 业务状态。
-6. Hook wrapper：各 Host 只在 `src/hook/hosts/` 做可替换文本 envelope；由于规格没有锁定外部 Host wire schema，真实 ZCode 协议兼容性列入 Task 8 外部验收风险，不伪称已完成。
-7. 最终验收：本地确定性路径以 79/79、117/117 等历史快照及当前 137/137 全量测试、lint、smoke、源码语法和 diff check 为证据；真实 Codex app-server、Host 断开和 ZCode E2E 未在缺少可验证外部会话时伪造通过，详情见 `docs/autonomous-runs/20260911-0926-codex-as-subagent-v1.md`。
-8. 多主会话隔离（用户 2026-09-11 拍板）：V1 隔离边界只到 workspace，无 session 维度；V1 使用前提为同一 workspace 同时只运行一个启用本插件的主会话。session 级隔离（Bootstrap 持有会话身份、`owner_session_id`、Hook 按会话领取）列入 V2，三个待拍板点（孤儿 completion 降级、跨 session 读、隐藏 vs 标注占用）已写入详细设计 6.2 节末尾。
-9. Codex CLI 来源（2026-09-11 核实）：本机无需另装 CLI，ChatGPT.app 内嵌完整 codex-cli 0.153.4，路径 `/Applications/ChatGPT.app/Contents/Resources/codex`，含 `app-server` 子命令；通过 vendor `AppServerClient` 的 `CODEX_BIN` 环境变量指向该路径即可，无需软链进 PATH。该 CLI 提供 `codex app-server generate-json-schema`，可导出当前版本官方 wire schema 用于核对 adapter 假设。
-10. 配置分层（用户 2026-09-11 拍板，同日晚澄清）：`~/.codex-as-subagent/config.toml` 是对 app-server 所用 Codex 配置的**可选增量覆写**（与 Codex 配置同名、只含 Codex 键）——文件不存在则不覆写，直接用 Codex 常规 `~/.codex/config.toml`；文件存在则在启动 app-server 时翻译为 `-c key=value` 参数注入（vendor 已支持 `CODEX_APP_SERVER_ARGS` 传参）。用途是解耦日常 Codex 与 Subagent 所用 Codex 的配置；它不配置 Server 自身行为。Codex 二进制路径不写入任何 config.toml，走 `CODEX_BIN` env，缺省时启动时自动发现为绝对路径。**实现状态（2026-09-11 补齐）**：`src/shared/codex-runtime.mjs` 解析平面键和 table 前缀，缺失文件保持干净 `app-server` 参数，格式错误 fail-closed；`src/cli/serve.mjs` 在 runtime probe 前加载并传入本次生命周期固定的 args。运行时自动发现已于 2026-09-11 定稿，见决策 11。
-11. Runtime 自动发现定稿（2026-09-11，依据调研 docs/research/2026-09-11-codex-runtime-discovery.md）：解析顺序 `CODEX_BIN` env > PATH > standalone managed（`~/.codex/packages/standalone/current/bin/codex`）> `~/.local/bin/codex` > Homebrew 已知路径 > ChatGPT.app 内嵌 > 旧 Codex.app 内嵌；不扫描 IDE 私有 runtime，不按版本号排序。发现目标是"满足 stable app-server contract 的 runtime"：realpath 去重 + `--version` + `generate-json-schema` 必需 method 检查 + ephemeral initialize 冒烟；记录 {binary, version, schema hash}；Server 单次生命周期不切换 binary，每次冷启动重新探测。永远自起 app-server 子进程，不 attach Desktop/managed daemon。调研推翻点：app-server 下 `-p` named profile 不可靠，覆写只走 `-c`；调研证实点：认证/配置经 `CODEX_HOME` 共享，App 登录后 CLI 无需再登录。**实现状态（2026-09-11 补齐）**：此前该项长期只有文档与"下一步候选"、无代码，经用户指出后落地于 `src/shared/codex-runtime.mjs`（`codexBinaryCandidates` / `REQUIRED_APP_SERVER_METHODS` / `probeCodexRuntime` / `resolveAppServerArgs`）+ `src/cli/serve.mjs`（冷启动探测、选中固定、失败 fail-closed 记 `codex.discovery.failed`）+ adapter 缺省参数注入。实测跳过 30 个不存在候选命中 0.153.4，全流程 107ms；serve 无 `CODEX_BIN` 可自主发现。安装脚本可选写 `CODEX_BIN` 作优先级 0 提前命中，但**发现始终由 Server 启动时执行**。
-12. 真实 app-server 冒烟（2026-09-11 通过）：ChatGPT.app 内嵌 codex-cli 0.153.4 经 vendor AppServerClient 完成 initialize/model/list/config/read 全链路；`config/read` 返回本机真实配置（gpt-5.6-luna + xhigh + danger-full-access），证实认证共享。九个 adapter 方法（thread/start、thread/resume、turn/start、turn/steer、turn/interrupt、thread/list、thread/read、model/list、config/read）在 0.153.4 官方导出 schema 中全部存在且参数形状匹配。**发现的兼容性问题**：vendor 默认启动参数 `-c mcp_servers.codex-supervisor.enabled=false` 在 0.153.4 下导致 app-server 直接退出（"invalid transport"），我们接入时必须总是显式设置 `CODEX_APP_SERVER_ARGS`（至少 `["app-server"]`），不能依赖 vendor 默认值。冒烟脚本暂存 /tmp/cas-smoke.mjs，待固化为仓库 scripts/。
-13. ZCode Hook 协议已查证（2026-09-11，harness 内嵌 subagent 逆向取证 + 主 Agent 抽查验证，全文 docs/research/2026-09-11-zcode-hook-protocol.md）：恰好 7 个事件（无 SubagentStop/SessionEnd）；stdout 必须以 `{` 开头的严格 JSON（`additionalContext`/`hookSpecificOutput`），纯文本被忽略；无 ACK，exit 0 即完成；Hook env 注入 `ZCODE_SESSION_ID`（session 隔离的关键字段已确认存在）；additionalContext 仅当前 turn 可见，Stop 事件可配 `decision:"block"` 续轮（最多 3 次）。**实测发现过三处实现硬伤**：plugins/zcode/plugin.json 曾使用不存在的 `mcpConfig`/`hooksConfig` 字段；hooks.json 曾使用非法事件 `after_turn`；zcode.mjs 曾输出会被忽略的纯文本。MCP server 是否注入 session env 未确认。三处插件问题已按决策 14 修复，运行态实证已由 1250/1340 两轮真实会话验收完成；仅"MCP server 是否注入 session env"仍未确认（列任务看板 Backlog）。
-14. 真实插件路径实测与 4 处缺陷修复（2026-09-11，记录 docs/autonomous-runs/20260911-1250-zcode-plugin-real-path.md）。安装方式：仓库根 `marketplace.json` 声明本地 directory marketplace，ZCode 以标准插件机制装入并启用；缓存插件对本机做了本地化 patch（`node` + 仓库绝对路径 + `CODEX_BIN`/`CODEX_APP_SERVER_ARGS` env），已实测 GUI 重启后 patch 保留（重启只读缓存、不从源目录重同步）。实测暴露的 4 处缺陷（fake-adapter 回归全部漏检）：
-    - **① Hook 参数解析（最严重，直接使回流失效）**：插件传 `--host=zcode`，但旧 `option()` 只认 `--host zcode`，host 静默回退 `plain`，ZCode 收到纯文本被忽略。已抽 `src/shared/argv.mjs` 统一支持 `--k=v` 与 `--k v` 两种形式，并修 `drain.mjs` 覆盖用户显式 host 的问题。
-    - **② `--data-dir` 未透传**：bootstrap spawn serve 时漏传，导致 SQLite 落默认目录、与 socket/lock 分叉。已在 `stdio-bootstrap`/`startup-lock`/`mcp` 全链路透传；未显式给定时按 socket 所在目录推导。
-    - **③ idle shutdown 不生效**：execution 在异步 terminal 事件里被移除后，没有任何请求边界再触发 idle 判定。已给 RuntimeManager 加 `subscribeStateChanges`，terminal/spawn/send 时主动通知 RuntimeServer 重算 idle；Server listen 后先 arm 一次。
-    - **④ server 无法真正退出（孤儿进程）**：旧 shutdown 只关 SQLite，未终止 app-server 子进程，其 stdio 句柄拖住事件循环，`SIGTERM` 打不掉（已在真机复现：旧进程 SIGTERM 后仍存活并挂着活 app-server）。已给 adapter 加 `close()` 并纳入 `SUPERVISOR_ADAPTER_METHODS` 契约（fake 缺省为 no-op），RuntimeManager.close 变 async 并 await 之，Server 经 `onClosed` 统一收口 store。新增 `src/shared/server-log.mjs`，serve 生命周期日志写 `<data-dir>/server.log`（诊断可观测性缺口）。验证：真实 turn spawn 后 SIGKILL 宿主，completion 落盘（completed/pending）且 Server 随后 idle 自动退出；`hook --host=zcode` 输出严格 JSON `{"additionalContext":...}` 且 completion 转 delivered。回归 90/90（当时值）。
-    - **生产路径全链路实证（2026-09-11 追加）**：默认数据目录 `~/.codex-as-subagent` 下冷启动干净 MCP 进程，`tools/list` 十工具齐全，真实 gpt-5.6-luna 子 agent spawn；**本 ZCode 会话自身的 Stop hook 自动执行了 `hook --host=zcode`**，将一条 pending completion 作为 additionalContext 注入并带 `decision:block` 续轮，completion 转 delivered——`spawn 异步 → 落盘 → Stop hook 自动回流 → 续轮`完整用户路径经 Host 真实驱动打通，非脚本模拟。
-15. 回流事件选择定稿（2026-09-11，用户质疑后重新论证，推翻照搬调研建议）：插件挂 `UserPromptSubmit` + `PostToolUse` + `Stop` 三个事件。
-    - `PostToolUse`（省略 matcher = 匹配所有工具，ZCode 官方语义）：turn 进行中即时回流，是"子 agent 完成就尽快通知主会话"的唯一途径；实测无 pending 时空查询仅 20–30ms，此前"每次工具调用加固定税"的顾虑被推翻。工具事件的 additionalContext 拼接到工具结果尾部，且**不接受 decision/continue**（误加会作废并记 hook failed），wrapper 已保证仅 Stop 输出 decision。
-    - `UserPromptSubmit`：跨 turn 兜底。
-    - `Stop`：仅覆盖"最后一次工具调用之后、turn 结束之前"落地的窄窗口，以 `decision:block` 续轮送达。**不添加 `stop_hook_active` 护栏**：claim→ack 会在 block 的同一瞬间清除 pending，产生 block 的前提自动消失，构造上无法套娃；naive 加护栏反而会掐掉合法投递。机制澄清：hook 从不等待子 agent（那是 `codex_wait` 的职责），也不阻塞 turn。
-    - 不再新增 Hook 事件的理由：`PreToolUse`/`PermissionRequest`/`PostToolUseFailure` 无回流语义；`SessionStart` 时机过早。会话 idle 期间子 agent 完成只能等下次 `UserPromptSubmit`，这是 Host 事件驱动的硬限制，与 ZCode 内置 mailbox 一致，配套解法是用户挂 Goal 保持主会话存活 + 模型用 `codex_wait`。
-    - 双通道无重复消费：`claimPendingHook` 只取 `delivery_state='pending'`，`codex_wait` 走 direct 投递置为 `claimed_direct→delivered`，两条路径互斥。
-16. ZCode 插件安装形态与 CLI 安装器（2026-09-11，用户拍板"两种并存"）。取证结论：
-    - **ZCode 无脚本化 install 命令**：`zcode plugins` 仅 `list|enable|disable|uninstall`（逐个试探 `install`/`add`/`remove` 均返回 Unknown）。官方生命周期是 GUI：Settings → Plugin Management → Discover 的 `+` 添加 marketplace（接受 GitHub/Git URL/本地目录/文件），再 Install/Enable。**我们的二进制不应承担"反向安装自己"的职责**，故 CLI 安装是便捷通道而非官方机制。
-    - **PATH 结论修正（推翻此前判断）**：此前据 `launchctl getenv PATH` 为空断言"GUI 子进程 PATH 不可信"。实测 GUI 传给 MCP 子进程的 PATH 很丰富（含 `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin`、nvm node bin 等）。故裸命令 `codex-as-subagent` 只要装进其中任一目录（`npm install -g .` 或软链）即可被解析；此前结论是基于错误探针的误判。
-    - **两种安装方式并存**：方式 A 走 ZCode GUI 标准路径（插件保持裸命令，要求命令在 PATH 中；社区分发推荐）。方式 B 为新增 `codex-as-subagent install --host=zcode`（`src/install/zcode-plugin.mjs` + `src/cli/install.mjs`）：拷贝插件到 `~/.zcode/cli/plugins/cache/<marketplace>/<name>/<version>`，把 `.mcp.json`/`hooks/hooks.json` 命令本地化为 `process.execPath` + CLI 绝对路径（**不依赖 PATH**），探测 Codex 运行时写入 `CODEX_BIN` 与 `CODEX_APP_SERVER_ARGS`，注册 marketplace/安装记录并启用；覆盖前各留 `.bak-cas` 备份；支持 `--dry-run`/`--portable`/`--zcode-root`；幂等且不破坏其它插件状态。
-    - 已用方式 B 对真实 ZCode 根实装并验证：`zcode plugins list` 显示 `hooks: 3`，缓存三事件齐全，4 个既有插件状态完好。回归 97/97（当时值）。
+## V2 动态决策（2026-09-12 定稿）
 
-17. 十工具 E2E 与中断协议裁决（2026-09-11，用户要求在真实 ZCode 会话内逐个实测）。实测 10 个工具全部可用，注入经 PostToolUse 在 turn 中途自动回流（非人工 `drain`）。**发现并修复第 5 个真 bug（协议层）**：codex app-server 把 `completed`/`interrupted`/`failed` 三种 turn 终止**复用同一个 `turn/completed` 通知**（已用 `generate-json-schema` 证实：全 schema 仅有 `TurnCompletedNotification`，无 `TurnFailed/InterruptedNotification`；真实终止状态在 `params.turn.status`，`TurnStatus = completed|interrupted|failed|inProgress`）。我们的 normalizer 原先用"方法名"推期望状态，导致 `turn/completed` + `status=failed|interrupted` 被判为冲突而不认作 terminal → 被中断/失败的 turn 永不落 completion、线程永久 `running`、Server 也无法 idle 退出（实测 B 线程中断后僵死 5 分钟）。修法：`refineTerminalType()` 仅依据 **canonical turn record** 的 status 把 `turn.completed` 细分为 `turn.interrupted`/`turn.failed`，并把该细分同步到 `collectStatusSources` 的顶层判别器；deep/nested 记录不参与，保持既有 fail-closed 冲突检测。该复用是上游设计预期（用户确认），非缺陷；缺陷在本侧判别逻辑。同时将 completion 注入文本中的内部 `completionId` 由完整 UUID 截断为前 8 位（内部主键对模型无用，避免外泄）。验证：中断长任务线程落到 `interrupted` 并自动回流；冷启动 recovery 将僵死 execution 对账为 `failed` 并回流；当轮回归 112/112（错误规范化完成时为 117/117）。记录 `docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md`。
-
-18. 跨客户端线程锁与错误规范化（2026-09-11 实测发现；错误规范化同日完成，锁本身按边界接受）。向"上一 Server 实例创建、当前实例未持有"的线程调 `codex_send` 时，上游返回 `thread ... already has an active writer`。
-    - **根因**：Codex app-server 对每个 thread 用 flock 型写锁（`~/.codex/thread-writer-locks/<threadId>.lock`，二进制含 `writer_lock.rs`、"failed to acquire thread writer lock"）。`~/.codex` 跨客户端共享，同一账号下运行的 ChatGPT 桌面版 app-server 会持有这些线程的锁。实测：桌面版 PID 63149 同时持有 9 个历史线程的锁；本 Server 自己新建的线程由其自己的 app-server 持有，`send` 正常；Server idle 退出后其 app-server 释放锁，再次冷启动时旧线程被桌面版接管 → 故"换实例后对旧线程 send"最易触发。这是共享 Codex 存储的固有限制，非本项目锁实现缺陷；V1 隔离边界是 workspace，不含"Codex 客户端独占"维度。**用户 2026-09-11 拍板：锁探测不做，接受此边界为前提**（该前提需在同机同 `~/.codex` 且多客户端并用时写入使用说明）。
-    - **影响面**：仅变更类操作失败（`codex_send`/`codex_steer`/`codex_interrupt`）；只读操作（`codex_status`/`codex_read_thread`）对锁定线程正常。协议层看不到锁：`Thread` 无锁字段，`ThreadStatus` 仅 `notLoaded|idle|systemError|active`。
-    - **错误规范化（已完成）**：原始错误形状经裸探针确认 —— `AppServerError`，`code` 为数字 `-32600`（通用 JSON-RPC Invalid Request，**无专用码**），`message` 为 `thread <id> already has an active writer`，发生在 `thread/resume`。故识别只能依据 message。实现：`src/shared/errors.mjs` 新增 `ERROR_CODES.THREAD_LOCKED`、`normalizeSupervisorError()`（正则 `/already has an active writer/i`，幂等）与固定文案 `Thread is locked by another Codex client. Close that client or use a new thread.`；接入点两处 —— `asDomainError()`（`runtime-manager.mjs`）与模型可见出口 `toolErrorContent()`（`stdio-bootstrap.mjs`，覆盖未走 `asDomainError` 的裸 `resumeThread` 路径）。**只规范化这一个已知原因，其余上游错误一律原样透传**（code/message 均不改），已验证 `thread not loaded` 等仍原样返回。实测新 MCP 进程返回 `{"code":"thread_locked","message":"Thread is locked by another Codex client..."}`，无原文泄漏。该阶段回归 117/117；当前全量回归为 137/137。
-    - 本轮实测细节见 docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md。注意：MCP bootstrap 是每会话新建进程，改动需新会话（或重启宿主）才在真实会话生效。
-
-19. Kimi 插件 MCP 工具暴露修复（2026-09-11，实证定案）：kimi 二进制 `normalizePluginMcpServer()` 对插件 manifest 的 MCP `command` 硬校验——只允许裸 PATH 命令或 `./` 开头（相对插件根，且 `isWithin` 限制在插件根内），违者推 warn diagnostic 后**静默丢弃整个 server**（无 spawn、无日志；hooks 走 shell 不受影响，故插件表现为"活着但无工具"）。修复：安装器生成插件内 launcher `bin/cas-run`（`exec <node> <repo>/src/cli/main.mjs "$@"`），manifest command 写 `./bin/cas-run`；对照组为官方插件 kimi-cu 的 `command:"sh", args:["./bin/kimi-cu-mcp"]`。真实重装后十工具在 Web 会话全部暴露并实测通过。
-20. Kimi 插件 MCP workspace 错配（2026-09-11 根因定位，同日晚方案 A 落地）：插件 MCP 由宿主以 `cwd = config.cwd ?? pluginRoot` 启动，导致 bootstrap 的 `process.cwd()` workspace 全部落错。二进制取证（0.42.0）已排除 roots/list（Client 无 capabilities.roots）、manifest cwd（限插件根内）、进程 env（无 session/workspace 变量）、父进程 cwd（全局 Server 不可靠）。**方案 A 落地（已实现并安装验证）**：取证确认用户级 `~/.kimi-code/mcp.json` 走 `WorkspaceMcpService.stdioCwd = workspace.cwd` → `McpConnectionManager` → `StdioMcpClient(defaultCwd)` 链路，用户级层不设 stdioCwdBase，`config.cwd` 为空时落到 workspace.cwd——即宿主以 workspace 为 cwd 拉起用户级 stdio MCP。实现：(a) `plugins/kimi-code/kimi.plugin.json` 移除 `mcpServers`（插件 manifest 禁止携带 MCP）；(b) `src/install/kimi-code-plugin.mjs` 把 CAS server（node 绝对路径 + `mcp`，startup 60s/tool 520s）合并写入 `$KIMI_CODE_HOME/mcp.json`，保留既有 server、`.bak-cas` 备份、原子写，且托管副本先清空再拷贝（旧 launcher 残留清除）；(c) launcher `bin/cas-run` 随插件 MCP 退出 manifest 而删除；(d) `src/mcp/workspace-context.mjs` 新增 `assertNotInsidePluginRoot`：cwd（含 symlink 规范化）落在 `KIMI_PLUGIN_ROOT` 内时抛 `WorkspaceUnavailableError` fail-closed，杜绝静默用错 workspace。验证：全量回归 149/149、lint/smoke 通过、真实 `install` 产物核对（mcp.json 合并正确、托管 manifest 无 mcpServers/launcher）、真机 fail-closed 复现（插件目录 cwd + KIMI_PLUGIN_ROOT → 明确报错）。**官方 `/plugins install` 路线从此只装 hooks，不含 MCP**（已写入插件 README）。剩余：用户级 E2E 复验（spawn → completion 回流）留给用户在 Kimi Code 执行。详见 docs/autonomous-runs/20260911-2100-kimi-web-workspace-mismatch-fix.md。
-21. **Completion 回流串线与隔离层级缺陷（2026-09-11 晚实测发现；方案待定稿，本轮不修）**：Kimi Web 实测 A 会话的 completion 被投递进同 workspace 的 B 会话（已停止运作的旧 session）。根因三层：(a) **host 层无隔离**——socket/锁/SQLite 路径全局固定（`~/.codex-as-subagent`），单实例 Server 服务所有 Host，`completions` 无 host 维度，且 `claimPendingHook` 入参虽含 `host` 但**实现从未使用**；(b) **workspace 层只在请求/执行层隔离**，投递仍只按 workspace 领取；(c) **session 层完全没有**（设计 6.2 已列为 V2）。直接触发者是 **Web 的 detached 常驻 worker**：脱离宿主生命周期、只在启动时校验一次 session，宿主异常退出后成孤儿且永不自愈，继续盲领 completion；实测孤儿 worker（PID 48074，17:39 启动、宿主已消失）在 22:42 领走新会话 completion。**实现与设计偏差**：设计定稿 §5.1 要求 Web「completion 一形成即可主动 push」的**事件驱动**语义，实际实现为常驻轮询，该选择由实现计划（`f2a7aea`）引入且**未回写设计定稿**。**ZCode 同款 session 级串投已于 2026-09-11 在无 Kimi worker 干扰的干净 workspace 内复现**（两个真实 ZCode 会话并发，A 存活期间其 completion 仍进 B、A 未收到；`delivery_id` 为普通 UUID 证实由 ZCode Hook 领取而非 Kimi worker）。另观察到跨 Host 干扰（ZCode 复验被运行中的 Kimi worker 抢占；两 Host 共享同一 SQLite 与 Server，Kimi worker 的 `--workspace` 启动即固定故换新 workspace 即可规避）。**附带发现**：宿主退出会连坐 `SIGINT` 杀掉 Server，异步 completion 来不及落盘（§2.4）。**用户意图：借此补齐至少三层隔离——host、workspace、session，方案先与更强模型讨论后定稿**。取证与完整分析见 docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md。
+1. **五项裁决**：(a) ZCode 本轮实现 Core Adapter 与全部 Host 维度逻辑，`plugins/zcode` 资源与真实 E2E 推后，旧 ZCode 插件暂时不可用为接受的阶段性状态，禁止为兼容而给 `--host` 默认值/保留 plain/猜 Host/workspace-only；(b) `current_session` 持久化为 SQLite `current_sessions` 表（主键 `(host, workspace)`），是 persisted routing state；(c) 无 `current_session` 时 MCP 调用 fail closed `session_not_established`（self-recovering）；(d) Kimi Web 回流为 Runtime 内部事件驱动 delivery，attach/worker/polling 全部废弃；(e) V1→V2 破坏性重建，不做 migration。
+2. **权威优先级**：active Execution（lifecycle truth）> `current_session`（routing state）> Thread Hold（control state）；stale routing/hold 状态不构成占用；conflict 一律为派生状态，durable facts 收敛后自动恢复（Recovery Matrix 见架构设计 §十）。
+3. **Thread Hold**：`thread_holds`（thread_id 主键）+ `host_presence`（(host, workspace, instance_id) 主键，heartbeat 20s / lease 60s，MCP Bootstrap 直写 SQLite，不经 Runtime Server RPC）；Hold 无独立 lease，有效性由 Presence + active Execution 判定；取得入口仅 spawn/send；lazy takeover 原子竞争；新 Hold 后 startTurn 失败只按本次 hold_id 释放。
+4. **线程操作语义**：send 按 A–F 判定算法（thread_busy/thread_held/lazy takeover）；steer/interrupt 不 takeover；wait 不取 Hold、对他 Host active Execution 报 `thread_held`；status/read_thread 对其他 active Host 有效持有的 Thread 报 `thread_held`；list_threads 只列 caller 持有 + free + stale-held idle。
+5. **claim 谓词**：Hook/Direct Wait/Web 一律 `(host, workspace, session_id, delivery_state='pending')`；Hook 缺 session_id 拒绝 claim 不得 fallback；Web 投递用 `claimed_hook` 槽位，`claimed_direct` 不再 web 发送；新增 `delivery.nack`（`WHERE host = ? AND delivery_id = ?`）。
+6. **CLI 协议**：`serve` 禁止 `--host/--workspace/--session`；`mcp --host` 必填、 Presence 注册成功后才处理调用、退出 best-effort detach；`hook --host` 必填、移除 plain fallback 与 `--workspace` override；`drain --host/--workspace/--session` 三项必填。
+7. **Host 身份**：Host 是产品类型（kimi-code/zcode/...），由 Host integration 静态指定，不得从 cwd/session/进程名/工具参数推断；未知 Host 在任何 CAS 状态读写前 `UnknownHostError` fail closed；TUI/Web 统一 `kimi-code`，`kimi-code-web`/`kimi-code-tui` 禁止。
+8. **文档裁决**：三份 V2 文稿为唯一权威，V1 设计降级基线；`src/hosts/<host>.mjs` 是 Host-native 字段唯一出现处，`cli/hook.mjs` 不直接读 Host-native 字段；禁止以 legacy 代码反推产品设计，代码与规范冲突时改代码。
 
 ## 执行边界
 
-- 主 Agent 负责需求收敛、任务排序、集成、独立 Review、最终验证与用户级验收。
-- 子 Agent 按计划分配互不重叠的写入范围，不创建新的子 Agent，不修改 docs/Codex As Subagent — 详细设计与编码规格.md。
+- 主 Agent 负责需求收敛、任务排序、集成、复核（本轮取消独立 Review Agent）、最终验证与用户级验收；验收记录写入 docs/autonomous-runs/。
+- 子 Agent 按计划分配互不重叠的写入范围，不创建新的子 Agent，不修改三份 V2 规格文档与 V1 基线文档。
 - 所有当前阶段更新写入本文件；稳定使用说明写入 README.md；通用规则写入 AGENTS.md。
 
-## 完成定义
+## 完成定义（本轮 V2）
 
-本轮至少应具备：可安装的 Node 项目；固定 Submodule；SQLite completion-first 状态机；workspace fail-closed；十个工具的 schema/handler；wait/wait_many 与 Hook 的同库双消费者；stdio/Unix socket 运行骨架；ZCode 插件配置；关键状态机和用户路径测试；完整验收记录。真实 Codex app-server 与 ZCode E2E 若受本机外部状态限制，必须明确记录证据和遗留风险。
+三份 V2 规格全部实现并通过确定性验收（含实施规格 §3.13 全部场景与架构设计 §十 Recovery Matrix 的可测行）：V2 schema 重建、Host-scope Store、Session Gate、Thread Hold/Presence、`thread_held`/`session_not_established`/`multiple_active_host_servers` 错误面、hook/drain/mcp 新 CLI 协议、Kimi TUI PreToolUse 双职责、Runtime 内部事件驱动 Web delivery、legacy kimi-web 移除、Kimi 插件与安装器更新；npm test/lint/smoke 全绿；真实 Kimi TUI/Web E2E 与 ZCode 插件集成按看板留给用户或下一轮。

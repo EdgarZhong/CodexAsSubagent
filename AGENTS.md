@@ -3,9 +3,10 @@
 ## 项目规则
 
 - 所有面向用户和项目文档使用中文；代码中的公共协议字段、错误类型和上游名称保持设计规格中的英文拼写。
-- 详细设计文件是 V1 的权威规格。发现歧义时先按最小、可恢复、fail-closed 的实现裁决，并将裁决记录到 CLAUDE.md 与本轮验收记录。
+- 三份 V2 规格是当前权威设计：`docs/CodexAsSubagent V2 Session 隔离与 Mailbox 架构设计.md`、`docs/CodexAsSubagent V2 串投修复与 Kimi Code 集成适配说明.md`、`docs/CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格.md`；`docs/Codex As Subagent — 详细设计与编码规格.md` 降级为 V1 基线，仅覆盖未被 V2 修改的语义。发现歧义时先按最小、可恢复、fail-closed 的实现裁决，并将裁决记录到 CLAUDE.md 与本轮验收记录；fail-closed 的统一恢复原则见架构设计 §十（durable facts 收敛后必须自动恢复，不依赖人工修库）。
 - 核心业务代码只能通过 src/adapters/supervisor/ 访问 vendor/codex-supervisor-mcp；禁止在 src/core/、src/server/、src/mcp/、src/hook/ 直接 import vendor 内部文件。
-- Host-specific 行为只能放在 plugins/ 或 src/hook/hosts/；核心 Runtime 禁止散落 if (host === ...) 分支。
+- Host-specific 行为只能放在 plugins/、src/hosts/（native payload 解析）或 src/hook/hosts/（输出 envelope）；核心 Runtime 禁止散落 if (host === ...) 分支。Host-native 字段名只允许出现在 src/hosts/<host>.mjs 中。
+- Host ID 由 Host integration 静态指定（kimi-code、zcode 等），不得从 cwd、session id、进程名或 MCP 工具参数推断；未知 Host 必须在任何 CAS 状态读写前 fail closed，正式集成禁止 plain fallback。
 - **`plugins/<host>/` 是各 Host 资源文件（MCP 注册、Hook 注册、manifest、说明）的唯一真源**。禁止手工编辑宿主（ZCode 等）的插件缓存或状态文件；任何对宿主可见的改动，都必须先改仓库源，再通过安装命令落到宿主。
 - threadId 是唯一公共 Subagent identity；turnId、event cursor、workspace、approval、raw events 和 delivery 内部字段不得泄漏到模型可见接口。
 - 模型不能指定 workspace/cwd；请求 workspace 必须由 Host 当前 canonical CWD 提供，无法获得或 realpath 不一致时 fail closed。
@@ -15,11 +16,12 @@
 
 ## 目录与职责
 
-- src/adapters/：上游协议和 SQLite 持久化适配层。
-- src/core/：线程执行、completion、workspace、模型和领域错误。
+- src/adapters/：上游协议和 SQLite 持久化适配层（V2 schema：executions/completions 含 host+session_id，新增 thread_holds/host_presence/current_sessions；不做 V1 迁移，检测旧 schema 直接废弃重建）。
+- src/core/：线程执行、completion、workspace、模型、Thread Hold 和领域错误。
+- src/hosts/：Host Protocol Registry 与各 Host native payload 解析（parseHookInvocation → HookContext），无状态共享模块。
 - src/server/：Unix socket Runtime Server、路由、锁、生命周期和恢复。
-- src/mcp/：stdio Bootstrap、10 个工具和公共响应投影。
-- src/hook/：薄 completion drain 与 Host wrapper。
+- src/mcp/：stdio Bootstrap、10 个工具、Presence 生命周期和公共响应投影。
+- src/hook/：薄 completion drain 与 Host 输出 envelope。
 - src/cli/：唯一命令行入口。
 - plugins/：各 Host 的资源源文件（MCP/Hook 注册、manifest、说明），是唯一真源；安装产物落到宿主缓存，不在本仓库。安装器实现在 src/install/。
 - tests/：按 unit/integration/e2e/fixtures 分层；测试不得依赖真实 Git diff 推断本 turn 修改。
@@ -27,7 +29,7 @@
 
 ## 开发流程
 
-1. 开始工作先检查 AGENTS.md、CLAUDE.md、README.md 和近两次提交中的文档变更。
+1. 开始工作先检查 AGENTS.md、CLAUDE.md、README.md、三份 V2 规格和近两次提交中的文档变更。
 2. 多步骤实现先在 docs/superpowers/plans/ 固定文件边界、接口、测试和完成判据，再按任务执行。
 3. 每项任务完成后运行覆盖其变更的最小测试；集成前运行完整测试、lint、smoke 和必要的真实用户路径。
 4. 子 Agent 只能修改分配的文件范围，必须写报告和测试证据；主 Agent 负责审查、集成、必要补丁和最终验收。
@@ -40,7 +42,7 @@
 - 静态检查运行：npm run lint（覆盖 `src/**/*.mjs` 的 Node 语法检查；仍非全量类型/规则检查，改动后不得据此宣称"静态检查通过"涵盖类型或业务规则）。
 - CLI/stdio/socket 基础回归运行：npm run smoke。
 - SQLite 并发场景必须验证 transaction 短、WAL/FULL/busy_timeout/foreign_keys 配置和 compare-and-set 状态转移。
-- 验收必须覆盖 spawn async、send/steer/interrupt、workspace 隔离、wait/wait_many、Hook claim/lease、crash recovery、lazy activation、idle shutdown、changed-files attribution 和 ZCode 插件骨架。
+- 验收必须覆盖：spawn async、send/steer/interrupt、Host/Workspace/Session 隔离、Session Gate 接管与 veto、Thread Hold 取得/接管/释放、Presence lease、wait/wait_many、Hook claim/lease（含缺 session_id 拒绝）、delivery ACK/NACK host scope、crash recovery（含 current_session 修复与多 active session fail closed）、lazy activation、idle shutdown、changed-files attribution，以及 V2 实施规格 §3.13 的全部验收场景。
 - 验收记录写入 docs/autonomous-runs/YYYYMMDD-HHmm-任务标题.md，每条用户行为路径记录预期结果、实际命令/输入和证据。
 
 ## Host 插件开发与安装 SOP

@@ -1,7 +1,7 @@
 # Codex As Subagent
 ## 详细设计与编码规格
 
-**状态：Implementation Ready**
+**状态：V1 基线规格（已交付）。V2 增量以三份 V2 文稿为唯一权威：《CodexAsSubagent V2 Session 隔离与 Mailbox 架构设计》《CodexAsSubagent V2 串投修复与 Kimi Code 集成适配说明》《CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格》；与本文冲突之处一律以 V2 为准。被取代或失效的小节已就地移除。**
 
 ---
 
@@ -106,7 +106,7 @@ approval request id
 - `codex_wait_many` 固定最多等待 **500 秒**；
 - wait timeout 只结束本次等待，不 interrupt Codex；
 - 模型不能指定 cwd/workspace；
-- 当前 Host workspace 是唯一工作区边界；
+- 工作区边界为 Host 静态指定的 canonical workspace；V2 起隔离命名空间升级为 `host → (host, workspace) → (host, workspace, session_id)`，见 V2 实施规格 §2；
 - 一个 thread 同一时刻最多一个 active turn；
 - 不暴露 turnId；
 - 不暴露 event cursor；
@@ -914,6 +914,8 @@ delivery_started_at = ...
 COMMIT
 ```
 
+> **V2 修订**：claim 谓词升级为完整 `host + workspace + session_id + delivery_state='pending'`（Hook 按自身 Session Identity、Direct Wait 按 current_session、Web 按静态归属），禁止 workspace-only claim，见 V2 架构设计 §八。
+
 然后才生成 stdout。
 
 成功：
@@ -1366,64 +1368,17 @@ COMMIT
 
 ## 5.3 数据模型
 
-建议：
+> **V2 起本节数据模型已被取代**：`executions` / `completions` 增加 `host`、`session_id` 列，新增 `thread_holds`、`host_presence`、`current_sessions` 表，索引与建表语句以《CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格》§2.3–2.7 为准。V2 不做数据迁移：部署 V2 前停止旧实例，旧数据库直接废弃重建（见该规格 §2.11）。
+
+本节以下并发模型与 PRAGMA 约束继续有效。
+
+建议 meta 表：
 
 ```sql
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
-```
-
-```sql
-CREATE TABLE executions (
-    thread_id TEXT NOT NULL,
-    turn_id TEXT NOT NULL,
-
-    workspace TEXT NOT NULL,
-    owner_instance_id TEXT NOT NULL,
-
-    model TEXT,
-    effort TEXT,
-
-    started_at TEXT NOT NULL,
-    last_activity_at TEXT NOT NULL,
-
-    reservation_id TEXT,
-    reservation_kind TEXT,
-    reservation_created_at TEXT,
-
-    PRIMARY KEY (thread_id, turn_id)
-);
-```
-
-```sql
-CREATE TABLE completions (
-    completion_id TEXT PRIMARY KEY,
-
-    thread_id TEXT NOT NULL,
-    turn_id TEXT NOT NULL,
-    workspace TEXT NOT NULL,
-
-    terminal_status TEXT NOT NULL,
-    payload_json TEXT NOT NULL,
-
-    delivery_state TEXT NOT NULL,
-    delivery_id TEXT,
-    delivery_started_at TEXT,
-    delivered_at TEXT,
-
-    created_at TEXT NOT NULL,
-
-    UNIQUE(thread_id, turn_id)
-);
-```
-
-索引：
-
-```sql
-CREATE INDEX completions_pending_workspace_idx
-ON completions(workspace, delivery_state, created_at);
 ```
 
 ---
@@ -1614,23 +1569,7 @@ interrupt 拒绝
 
 即使模型偶然知道另一个 threadId，也不能跨 workspace 使用。
 
-### 同 workspace 多主会话：V1 局限与 V2 方向
-
-V1 的隔离边界只到 workspace，没有 session 维度：
-
-- `executions` / `completions` 的归属字段只有 `workspace`，没有 `owner_session_id`。
-- Hook 按 workspace 领取 pending completion：同一目录下任意主会话触发的 Hook 会领走该目录下所有会话的 completion。
-- `codex_list_threads` 对同 workspace 的所有 thread 可见，`send` / `steer` / `interrupt` 无会话归属保护。
-
-**V1 使用前提（用户 2026-09-11 拍板）**：同一 workspace 同时只运行一个启用本插件的 Host 主会话；并行分工由 subagent 之间的并行承担。这不视为致命设计缺陷，而是本协作形态的目标用法。
-
-**V2 改进方向**：session 身份不由模型提供，而由每个 Host 会话各自拉起的 stdio Bootstrap 进程持有——启动时从 Host 注入的环境变量（如 `ZCODE_SESSION_ID`）读取，缺失则自生成随机 ID，随请求作为隐藏 context 传给 Server。数据模型上 `executions` / `completions` 增加 `owner_session_id`，spawn 时写入；Hook 携带同一会话身份，只 claim 本 session 的 completion；`list_threads` 默认只列本 session，或全列但标注 `occupied_by_other_session` 且跨会话控制操作 fail-closed。
-
-**V2 落地前需拍板的三件事**：
-
-1. 孤儿 completion：属主 session 崩溃后再无 Hook 领取，是加 lease/TTL 后降级为 workspace 级可见，还是永久锁定。
-2. 跨 session `read_thread`：只读放行（利于调试）还是完全不可见（隔离更干净）。
-3. `list_threads` 对其他 session 的 thread：隐藏还是标注占用。
+> **V2 补充**：session 级隔离已在 V2 落地（`current_session`、Thread Hold、按 `(host, workspace, session_id)` 的 claim 谓词），`list_threads` 只列出 caller Host 当前持有的 Thread、free Thread 与 holder 已 stale 的 idle Thread，不显示其他 active Host 有效持有的 Thread；Thread 读写控制语义以《CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格》§1 为准。本节原有的"V1 局限与 V2 方向"提案（Bootstrap 持有 session、`owner_session_id` 等）已被该设计取代，予以移除。
 
 ---
 
@@ -2161,6 +2100,8 @@ src/hook/hosts/
 
 做薄封装。
 
+> **V2 修订**：Host native payload 的解析统一收敛到 `src/hosts/<host>.mjs`（Host Protocol Registry + `parseHookInvocation`），`cli/hook.mjs` 不再直接读取任何 Host-native 字段；`src/hook/hosts/` 仅保留输出文本 envelope。见 V2 实施规格 §3。
+
 核心：
 
 ```text
@@ -2194,87 +2135,7 @@ read_thread
 
 ## 9.1 推荐编码顺序
 
-第一阶段建立 Git Submodule 与 Supervisor Adapter，首先跑通：
-
-```text
-start/stop app-server
-thread start/resume
-turn start/steer/interrupt
-thread/history
-model/config
-runtime event subscription
-```
-
-第二阶段建立核心 Runtime 与 MCP façade：
-
-```text
-WorkspaceGuard
-RuntimeManager
-TerminalResult
-ChangedFiles aggregation
-10 public MCP tools
-```
-
-第三阶段加入 SQLite：
-
-```text
-executions
-completions
-reservation
-delivery state
-```
-
-并首先完成：
-
-```text
-TerminalResult always persisted first
-```
-
-这一不变量。
-
-第四阶段实现两种 completion consumer：
-
-```text
-wait / wait_many
-Hook
-```
-
-包括：
-
-```text
-direct reservation
-direct delivery ACK
-Hook claim
-delivery lease
-failed delivery fallback
-```
-
-第五阶段拆分：
-
-```text
-independent Runtime Server
-+
-stdio Bootstrap
-```
-
-实现：
-
-```text
-lazy process activation
-Host-independent runtime ownership
-idle shutdown
-startup lock
-```
-
-第六阶段完成：
-
-```text
-plugins/zcode
-```
-
-并进行真实 ZCode + Codex E2E。
-
-随后增加其他 Host adapter。
+> 本节为 V1 实施顺序的历史记录，已执行完毕（见 git 历史与 docs/autonomous-runs/ 验收记录），不再作为现行规范。V2 的实施计划见 docs/superpowers/plans/。
 
 ---
 
@@ -2441,51 +2302,7 @@ plugins/*
   = Host-specific MCP/Hook registration
 ```
 
-V1 只有同时满足以下行为才算完成：
-
-```text
-十个 MCP tools 按本文 schema 工作
-
-spawn 确实立即返回
-
-多个 Codex thread 可并行
-
-已有 thread 可以 send 继续
-
-workspace 强隔离
-
-wait 固定 500 秒且不 cancel
-
-wait_many 行为确定
-
-所有 TerminalResult 先持久化
-
-没有 waiter 的 terminal 进入 pending completion
-
-pending completion 能被 Hook 自动回流
-
-已有 pending completion 也能被后续 wait 原子领取
-
-wait 与 Hook 不会正常情况下双重交付
-
-Host 在 wait 中退出不会丢 completion
-
-Host 退出不会停止 active Codex
-
-Server 无 active execution 后能够自动退出
-
-Server 已退出时 Hook 仍能消费 completion
-
-Server / app-server crash 后状态可以恢复到明确结果
-
-当前 turn changed-files attribution 准确
-
-Dedicated Codex profile 提供稳定默认模型
-
-ZCode 插件完整 E2E 通过
-
-核心 Runtime 不依赖 ZCode 专有协议
-```
+> V1 的完成条件清单（十工具 schema、spawn 异步、workspace 强隔离、completion-first、双消费者、crash 恢复、changed-files attribution、ZCode E2E 等）已于 2026-09-11 全部达成并经用户级验收，历史清单不再保留，证据见 docs/autonomous-runs/。V2 的验收条件以《CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格》§3.13 为准。
 
 本规格中的：
 
