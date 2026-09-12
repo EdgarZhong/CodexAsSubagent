@@ -3,7 +3,10 @@
     "codex-as-subagent": {
       "type": "stdio",
       "command": "codex-as-subagent",
-      "args": ["mcp"]
+      "args": [
+        "mcp",
+        "--host=zcode"
+      ]
     }
   }
 }

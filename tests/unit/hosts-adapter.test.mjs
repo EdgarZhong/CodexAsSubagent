@@ -108,12 +108,16 @@ test('zcode adapter treats a missing session env as undefined (Hook channel only
   assert.equal(zcode.parseHookInvocation({ payload: { cwd: '/r' } }).sessionId, undefined);
 });
 
-test('kimi-code adapter declares PreToolUse/Stop block delivery and the PreToolUse session gate', () => {
+test('kimi-code adapter declares PreToolUse/Stop block delivery, the PreToolUse session gate, and full delivery coverage', () => {
   assert.deepEqual([...kimiCode.blockDeliveryEvents].sort(), ['PreToolUse', 'Stop']);
   assert.equal(kimiCode.sessionGateEvent, 'PreToolUse');
-  // zcode 无 block 语义（stdout 严格 JSON + decision 字段），无 Session Gate。
-  assert.equal(zcode.blockDeliveryEvents, undefined);
-  assert.equal(zcode.sessionGateEvent, undefined);
+  // kimi 注册的三个事件全部承担回流。
+  assert.deepEqual([...kimiCode.deliveryEvents].sort(), ['PreToolUse', 'Stop', 'UserPromptSubmit']);
+  // zcode 无 block 语义（stdout 严格 JSON + decision 字段），
+  // Session Gate 挂 PreToolUse；回流窗口不含 PreToolUse（门禁专用）。
+  assert.equal(zcode.blockDeliveryEvents.size, 0);
+  assert.equal(zcode.sessionGateEvent, 'PreToolUse');
+  assert.deepEqual([...zcode.deliveryEvents].sort(), ['PostToolUse', 'Stop', 'UserPromptSubmit']);
 });
 
 test('kimi-code gate veto copy keeps the not-executed-then-retry semantics', () => {
@@ -125,4 +129,17 @@ test('kimi-code gate veto copy keeps the not-executed-then-retry semantics', () 
   assert.match(kimiCode.gateVetoText('occupied'), /another Kimi session/i);
   assert.match(kimiCode.gateVetoText('missing_session'), /session identity/i);
   assert.match(kimiCode.gateVetoText('unavailable'), /unavailable/i);
+});
+
+test('adapter contracts declare gate/delivery events per host protocol', () => {
+  assert.equal(kimiCode.sessionGateEvent, 'PreToolUse');
+  assert.deepEqual([...kimiCode.deliveryEvents].sort(), ['PreToolUse', 'Stop', 'UserPromptSubmit']);
+  assert.deepEqual([...kimiCode.blockDeliveryEvents].sort(), ['PreToolUse', 'Stop']);
+
+  assert.equal(zcode.sessionGateEvent, 'PreToolUse');
+  assert.deepEqual([...zcode.deliveryEvents].sort(), ['PostToolUse', 'Stop', 'UserPromptSubmit']);
+  assert.equal(zcode.blockDeliveryEvents.size, 0, 'zcode deliveries are stdout JSON + exit 0, never exit-2 block');
+  assert.match(zcode.gateVetoText('occupied'), /another ZCode session/i);
+  assert.match(zcode.gateVetoText('missing_session'), /session identity/i);
+  assert.match(zcode.gateVetoText('unavailable'), /unavailable/i);
 });

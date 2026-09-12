@@ -1,13 +1,31 @@
 {
   "description": "Codex As Subagent completion drain hooks for ZCode.",
   "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "process",
+            "command": "codex-as-subagent",
+            "args": [
+              "hook",
+              "--host=zcode"
+            ],
+            "timeoutMs": 30000
+          }
+        ]
+      }
+    ],
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "process",
             "command": "codex-as-subagent",
-            "args": ["hook", "--host=zcode"],
+            "args": [
+              "hook",
+              "--host=zcode"
+            ],
             "timeoutMs": 30000
           }
         ]
@@ -19,7 +37,10 @@
           {
             "type": "process",
             "command": "codex-as-subagent",
-            "args": ["hook", "--host=zcode"],
+            "args": [
+              "hook",
+              "--host=zcode"
+            ],
             "timeoutMs": 30000
           }
         ]
@@ -31,7 +52,10 @@
           {
             "type": "process",
             "command": "codex-as-subagent",
-            "args": ["hook", "--host=zcode"],
+            "args": [
+              "hook",
+              "--host=zcode"
+            ],
             "timeoutMs": 30000
           }
         ]

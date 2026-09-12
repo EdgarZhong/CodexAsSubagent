@@ -23,7 +23,10 @@
 - [x] T5 Kimi 插件资源与安装器（hooks 恰为 PreToolUse/Stop/UserPromptSubmit；MCP 注册 args `["mcp","--host=kimi-code"]`；README/SYSTEM 更新）。
 - [x] T6 主会话集成与回归：serve 接线、install 文案；真实 SQLite 端到端探针（隔离/门禁/接管/回流/跨 session 不串投）通过；验收记录 docs/autonomous-runs/20260912-1610-v2-host-session-isolation.md（T4 收口轮另立记录）。
 - [ ] 用户级验收：真实 Kimi TUI E2E 由用户执行（重装插件 → 重启宿主 → TUI PreToolUse 回流；MCP 验证 `--host=kimi-code`；Web 端当前仅验证 MCP 正常注册，无 Web 投递路径）。
-- [ ] ZCode 插件集成与真实 E2E（单独一轮；现有 ZCode 安装在 V2 下暂时不可用，为已接受状态）。
+- [x] ZCode 插件集成（2026-09-12 晚，收口后单独轮）：adapter 契约补齐（`sessionGateEvent='PreToolUse'`、`blockDeliveryEvents` 空集、新增 `deliveryEvents` 字段——zcode 的 PreToolUse 仅门禁不做回流）+ hook.mjs 回流按 deliveryEvents 门控；`plugins/zcode` 资源 V2 化（`.mcp.json` 加 `--host=zcode`、hooks.json 增 PreToolUse 门禁、README 修"没有 Hook"全局承诺为 per-Host 口径）；安装器 `localizeMcpConfig` 保留源 args；新增 6 个 zcode 用例，回归 217/217。真实 ZCode E2E 待用户后续验证。
+- [x] Kimi E2E 准备（2026-09-12 晚）：`install --host=kimi-code` 重装 V2 插件到宿主并验证注册（用户级 mcp.json 携带 `--host=kimi-code`、hooks 恰为 PreToolUse/Stop/UserPromptSubmit）；真实会话测试由用户执行。
+- [ ] 用户级验收：真实 Kimi 会话 E2E 由用户执行（spawn → completion 落盘 → PreToolUse 回流注入）。
+- [ ] 用户级验收：真实 ZCode 会话 E2E（新会话验证 Session Gate 建立与 veto、PostToolUse/Stop/UserPromptSubmit 回流）。
 
 ### Backlog（承接 V1 未完成项）
 
@@ -66,6 +69,7 @@
 8. **文档裁决**：三份 V2 文稿为唯一权威，V1 设计降级基线；`src/hosts/<host>.mjs` 是 Host-native 字段唯一出现处，`cli/hook.mjs` 不直接读 Host-native 字段；禁止以 legacy 代码反推产品设计，代码与规范冲突时改代码。
 9. **实现边界裁决（2026-09-12，逐条证据见验收记录 §五）**：Hold 接管为"快照读 → 事务外 presence 判定 → CAS 写 + 冲突重读"；Gate 空闲竞争按懒切换语义（先后 allow）；heartbeat UPDATE-only（`refreshed:false` 由调用方重挂）；`resumeThread` 失败同样释放本次新 Hold；无法确定唯一 holder 的 `thread_held` 不带 `data.holderHost`；provenance 显式事件值优先、行一致性校验 fail closed；gate 求值失败 veto（fail closed）、回流渲染失败 fail-open；kimi-web legacy 文件移入 `.archive/v2-removed/`。
 10. **T4 收口六项裁决（2026-09-12，用户逐条确认）**：(a) Web delivery 新旧实现全部删除归档，不区分旧旁路与上轮新实现；(b) 孤儿 claim 用 lease recovery（`claimed_at`+timeout），下沉为 claim 层通用机制（Hook claim 与 waiter claim 消费前先回收），不加 Runtime 启动 sweep；(c) 删除 `multiple_active_host_servers`（Session 级单活跃实例约束独立成立）；(d) `claimed_waiter` = waiter 持有消费权（不分 terminal 前后），出生态仍只有两分支；(e) reservation 载体维持 executions.reservation_*，不新增表，kind 值 'direct'→'waiter'；(f) 内部 RPC 参数 `deliveryId`→`claimId`，迟到 ACK/NACK 不得影响新 claim（有测试证明）。
+11. **ZCode 集成轮裁决（2026-09-12 晚）**：(a) zcode `sessionGateEvent='PreToolUse'`（7 事件含 PreToolUse、exit 2=阻断已实证，与 kimi 同构）；(b) 新增 adapter 契约字段 `deliveryEvents`（回流消费窗口），zcode 的 PreToolUse 仅门禁不做回流——ZCode 对 PreToolUse stdout additionalContext 的注入行为未经实证，claim 后可能被宿主丢弃，pending completion 由紧随的 PostToolUse 即时接管；(c) zcode `blockDeliveryEvents` 为空集（投递全走 stdout 严格 JSON + exit 0，Stop 续轮由 envelope `decision:block` 表达）；(d) 安装器 `localizeMcpConfig` 改为保留插件源 args（原实现硬编码 `[cliPath,'mcp']` 会丢 `--host`）；(e) 插件版本维持 0.1.0 不 bump（CLI 重装幂等，版本升级留到发布）；(f) zcode gate veto 文案写 stderr + exit 2（阻断语义已实证，stderr 对模型的可见性待真实 E2E 确认）。 (g) 修复安装器 CODEX_BIN 探测 bug：zcode-plugin 的 `isExecutable` 为 async，共享发现逻辑同步取真值恒真，导致返回第一个 PATH 候选（可指向不存在的文件）；改用共享同步 accessSync 检查并有回归测试。Kimi 安装器不写 CODEX_BIN，未受影响。
 
 ## 执行边界
 

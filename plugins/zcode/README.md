@@ -2,18 +2,21 @@
 
 本插件只注册 Host 入口，不复制 Runtime、SQLite 或 completion routing 逻辑：
 
-- `.mcp.json` 注册 `codex-as-subagent mcp`，提供十个 MCP 工具。
-- `hooks/hooks.json` 在 `UserPromptSubmit`、`PostToolUse`（省略 matcher，匹配所有工具）与 `Stop` 三个事件触发 `codex-as-subagent hook --host=zcode`，从当前 workspace 的持久 completion buffer 回流结果。
+- `.mcp.json` 注册 `codex-as-subagent mcp --host=zcode`，提供十个 MCP 工具。
+- `hooks/hooks.json` 在 `PreToolUse`、`UserPromptSubmit`、`PostToolUse`（省略 matcher，匹配所有工具）与 `Stop` 四个事件触发 `codex-as-subagent hook --host=zcode`。
 
-三个事件的职责：
+四个事件的职责：
 
 | 事件 | 作用 |
 | --- | --- |
-| `PostToolUse` | turn 进行中即时回流：每次工具调用返回时顺带查一次，子 agent 若已完成则当场注入，模型立刻可见 |
+| `PreToolUse` | 仅承担 CAS Session Gate：调用 CAS MCP 工具前按当前 ZCode session（`ZCODE_SESSION_ID`）做准入（空闲则建立/接管 current_session；他 session 仍占用则 exit 2 阻断该工具），不做 Mailbox 回流 |
+| `PostToolUse` | turn 进行中即时回流：每次工具调用返回时顺带查一次，子 agent 若已完成则当场注入（stdout JSON additionalContext，exit 0），模型立刻可见 |
 | `UserPromptSubmit` | 跨 turn 兜底：用户提交新 prompt 时捞取未被消费的 completion |
 | `Stop` | turn 结束时兜底：覆盖"最后一次工具调用之后、turn 结束之前"落地的结果，以 `decision:block` 续轮送达 |
 
-Hook 只读取已持久化完成结果，不启动、恢复或中断 Codex thread，也不等待子 agent（无 pending 时约 20–30ms 返回）。没有 Hook 能力时，仍可通过 `codex_wait`、`codex_wait_many`、`codex_status` 和 `codex_read_thread` 使用 Runtime。
+Hook 只读取已持久化完成结果，不启动、恢复或中断 Codex thread，也不等待子 agent（无 pending 时约 20–30ms 返回）。
+
+> **没有 Hook 时的行为不做跨 Host 承诺**：ZCode 属于 session-blind MCP Host，session 身份只经 Hook 通道（`ZCODE_SESSION_ID`）进入 Runtime；没有 Hook 时 `current_session` 无法建立，session-sensitive 的 CAS MCP 调用会合法失败为 `session_not_established`（fail closed，重装插件/恢复 Hook 后自恢复）。
 
 ## 安装方式（两种并存）
 

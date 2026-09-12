@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
+import { access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
@@ -15,6 +16,7 @@ import {
   localizeHooksConfig,
   localizeMcpConfig,
   pluginPaths,
+  discoverCodexBinary,
 } from '../../src/install/zcode-plugin.mjs';
 
 async function json(path) {
@@ -35,6 +37,12 @@ test('localizeMcpConfig rewrites the bare command into node + absolute CLI path'
   assert.equal(server.command, process.execPath);
   assert.deepEqual(server.args, ['/repo/src/cli/main.mjs', 'mcp']);
   assert.equal(server.env.CODEX_BIN, '/x/codex');
+});
+
+test('localizeMcpConfig preserves plugin-declared args (e.g. --host)', () => {
+  const mcp = { mcpServers: { [PLUGIN_NAME]: { type: 'stdio', command: PLUGIN_NAME, args: ['mcp', '--host=zcode'] } } };
+  const localized = localizeMcpConfig(mcp, { cliPath: '/repo/src/cli/main.mjs' });
+  assert.deepEqual(localized.mcpServers[PLUGIN_NAME].args, ['/repo/src/cli/main.mjs', 'mcp', '--host=zcode']);
 });
 
 test('localizeHooksConfig rewrites every event and preserves hook args and timeouts', () => {
@@ -70,12 +78,12 @@ test('installZcodePlugin copies, localizes, registers and enables the plugin', a
   const mcp = await json(join(plan.installPath, '.mcp.json'));
   const server = mcp.mcpServers[PLUGIN_NAME];
   assert.equal(server.command, process.execPath, '缓存版本应本地化为 node');
-  assert.deepEqual(server.args, [CLI_ENTRY, 'mcp']);
+  assert.deepEqual(server.args, [CLI_ENTRY, 'mcp', '--host=zcode']);
   assert.equal(server.env.CODEX_BIN, '/Applications/ChatGPT.app/Contents/Resources/codex');
   assert.equal(server.env.CODEX_APP_SERVER_ARGS, '["app-server"]');
 
   const hooks = await json(join(plan.installPath, 'hooks', 'hooks.json'));
-  assert.deepEqual(Object.keys(hooks.hooks).sort(), ['PostToolUse', 'Stop', 'UserPromptSubmit']);
+  assert.deepEqual(Object.keys(hooks.hooks).sort(), ['PostToolUse', 'PreToolUse', 'Stop', 'UserPromptSubmit']);
   for (const event of Object.keys(hooks.hooks)) {
     const entry = hooks.hooks[event][0].hooks[0];
     assert.equal(entry.command, process.execPath);
@@ -135,5 +143,25 @@ test('portable install keeps the bare command for PATH-resolved binaries', async
   const mcp = await json(join(plan.installPath, '.mcp.json'));
   const server = mcp.mcpServers[PLUGIN_NAME];
   assert.equal(server.command, PLUGIN_NAME);
-  assert.deepEqual(server.args, ['mcp']);
+  assert.deepEqual(server.args, ['mcp', '--host=zcode']);
+});
+
+test('discoverCodexBinary skips PATH entries without an actual codex executable', async (t) => {
+  const { mkdtemp, writeFile, chmod } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const realDir = await mkdtemp(join(tmpdir(), 'cas-discovery-real-'));
+  const fakeDir = join(realDir, 'empty-path-entry');
+  const binaryPath = join(realDir, 'codex');
+  await writeFile(binaryPath, '#!/bin/sh\nexit 0\n');
+  await chmod(binaryPath, 0o755);
+  t.after(async () => { await import('node:fs/promises').then((m) => m.rm(realDir, { recursive: true, force: true })); });
+  // 第一个 PATH 条目不存在 codex 文件：必须跳过，命中第二个条目。
+  const env = { PATH: `${fakeDir}:${realDir}` };
+  assert.equal(await discoverCodexBinary({ env }), binaryPath);
+  // PATH 全落空时按固定候选顺序回落：结果必须是真实存在的可执行文件，
+  // 绝不允许凭空返回不存在的第一个 PATH 候选（回归：async exists 恒真 bug）。
+  const fallback = await discoverCodexBinary({ env: { PATH: fakeDir } });
+  assert.equal(typeof fallback, 'string');
+  await assert.doesNotReject(access(fallback, constants.X_OK));
 });

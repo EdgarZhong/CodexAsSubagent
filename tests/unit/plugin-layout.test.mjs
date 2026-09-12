@@ -21,8 +21,8 @@ test('ZCode plugin registers MCP and Hook without copying runtime logic', async 
   const server = mcp.mcpServers['codex-as-subagent'];
   assert.equal(server.type, 'stdio');
   assert.equal(server.command, 'codex-as-subagent');
-  assert.deepEqual(server.args, ['mcp']);
-  for (const event of ['UserPromptSubmit', 'PostToolUse', 'Stop']) {
+  assert.deepEqual(server.args, ['mcp', '--host=zcode']);
+  for (const event of ['PreToolUse', 'UserPromptSubmit', 'PostToolUse', 'Stop']) {
     const entries = hooks.hooks[event];
     assert.ok(Array.isArray(entries) && entries.length === 1, `hooks.hooks.${event} must exist`);
     const entry = entries[0].hooks[0];

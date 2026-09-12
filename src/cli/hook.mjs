@@ -112,10 +112,11 @@ export async function hook(argv = [], {
   }
 
   try {
-    // ① Mailbox 主动回流优先：有 sessionId 才允许 claim（缺 sessionId 拒绝，不做
-    //    workspace-only fallback）；注入 completion 后本次 PreToolUse/Stop 到此结束，
-    //    不再执行 Session 门禁（回流与 CAS 使用权解耦）。
-    if (hookContext.sessionId) {
+    // ① Mailbox 主动回流优先：仅在 adapter 声明的回流事件上消费（如 zcode 的
+    //    PreToolUse 只做门禁不做回流），有 sessionId 才允许 claim（缺 sessionId 拒绝，
+    //    不做 workspace-only fallback）；注入 completion 后本次事件到此结束，不再执行
+    //    Session 门禁（回流与 CAS 使用权解耦）。
+    if (adapter.deliveryEvents.has(hookContext.event) && hookContext.sessionId) {
       let injected = false;
       try {
         const result = await drainPending({

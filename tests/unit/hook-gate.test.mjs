@@ -200,21 +200,21 @@ test('Stop only performs mailbox delivery: injects on block semantics, passes si
   assert.equal(empty.store.calls.some(([kind]) => kind === 'gate'), false, 'Stop never runs the session gate');
 });
 
-test('zcode hooks deliver through stdout with exit 0 and never run a session gate', async () => {
+test('zcode PostToolUse delivers through stdout with exit 0 and never runs a session gate', async () => {
   const { store, openStore } = fakeStore({ pending: [COMPLETION] });
   const result = await runHook(['--host=zcode', '--data-dir=/tmp/hook-x'], {
     payload: {
-      hook_event_name: 'PreToolUse',
+      hook_event_name: 'PostToolUse',
       cwd: '/repo/b',
-      tool_name: 'codex_spawn',
-      tool_input: { prompt: 'hi' },
+      tool_name: 'Bash',
+      tool_input: { command: 'ls' },
     },
     env: { ZCODE_SESSION_ID: 'zc-1' },
     openStore,
   });
   assert.equal(result.code, 0, 'zcode has no block-delivery events');
   assert.match(result.stdout, /codex-completion|subagent finished/);
-  assert.equal(store.calls.some(([kind]) => kind === 'gate'), false, 'zcode declares no session gate');
+  assert.equal(store.calls.some(([kind]) => kind === 'gate'), false, 'delivery events never run the gate');
   const claim = store.calls.find(([kind]) => kind === 'claim');
   assert.equal(claim[1].sessionId, 'zc-1');
   assert.equal(claim[1].host, 'zcode');
@@ -249,4 +249,48 @@ test('a missing payload cwd falls back to process.cwd() for the workspace guard'
   });
   const gate = store.calls.find(([kind]) => kind === 'gate');
   assert.equal(gate[1].workspace, '/canonical/fallback-cwd');
+});
+
+test('zcode PreToolUse is gate-only: CAS tool goes through the gate without a mailbox claim', async () => {
+  const { store, openStore } = fakeStore({ pending: [COMPLETION], gate: { decision: 'allow', reason: 'session_established' } });
+  const result = await runHook(['--host=zcode', '--data-dir=/tmp/hook-x'], {
+    env: { ZCODE_SESSION_ID: 'zc-1' },
+    payload: basePayload({ hook_event_name: 'PreToolUse' }),
+    openStore,
+  });
+  assert.equal(result.code, 0);
+  assert.equal(store.calls.some(([kind]) => kind === 'claim'), false, 'zcode PreToolUse must not claim the mailbox');
+  const gate = store.calls.find(([kind]) => kind === 'gate');
+  assert.deepEqual(gate[1], { host: 'zcode', workspace: '/canonical/repo/a', sessionId: 'zc-1' });
+  assert.equal(store.calls.some(([kind]) => kind === 'gate'), true);
+});
+
+test('zcode PreToolUse veto blocks the CAS tool with the zcode envelope', async () => {
+  const { store, openStore } = fakeStore({ gate: { decision: 'veto', reason: 'other_session_active' } });
+  const result = await runHook(['--host=zcode', '--data-dir=/tmp/hook-x'], {
+    env: { ZCODE_SESSION_ID: 'zc-1' },
+    payload: basePayload({ hook_event_name: 'PreToolUse' }),
+    openStore,
+  });
+  assert.equal(result.code, 2);
+  assert.match(result.stderr, /another ZCode session/i);
+  assert.match(result.stderr, /NOT been executed/i);
+  assert.equal(result.stdout, '');
+});
+
+test('zcode Stop delivers pending completions as stdout JSON with decision:block (exit 0)', async () => {
+  const { store, openStore } = fakeStore({ pending: [COMPLETION] });
+  const result = await runHook(['--host=zcode', '--data-dir=/tmp/hook-x'], {
+    env: { ZCODE_SESSION_ID: 'zc-1' },
+    payload: basePayload({ hook_event_name: 'Stop' }),
+    openStore,
+  });
+  assert.equal(result.code, 0, 'zcode deliveries always exit 0');
+  const output = JSON.parse(result.stdout);
+  assert.match(output.additionalContext, /subagent finished/);
+  assert.equal(output.decision, 'block');
+  assert.equal(result.stderr, '');
+  assert.ok(store.calls.some(([kind]) => kind === 'claim'));
+  assert.ok(store.calls.some(([kind]) => kind === 'ack'));
+  assert.equal(store.calls.some(([kind]) => kind === 'gate'), false, 'delivery events never run the gate');
 });

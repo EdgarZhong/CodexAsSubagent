@@ -53,7 +53,7 @@ export async function install(argv = [], { stdout = process.stdout, stderr = pro
       ...plan.actions.map((action) => `    - ${action}`),
     ];
     if (!plan.dryRun) {
-      lines.push('  提示: 重启 ZCode 或新开会话后生效；三个 hook 事件为 UserPromptSubmit / PostToolUse / Stop。');
+      lines.push('  提示: 重启 ZCode 或新开会话后生效；hook 事件为 PreToolUse（仅 Session Gate）/ UserPromptSubmit / PostToolUse / Stop。');
     }
     stdout.write(`${lines.join('\n')}\n`);
     return 0;

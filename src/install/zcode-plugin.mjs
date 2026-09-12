@@ -71,22 +71,12 @@ async function backupOnce(path) {
   }
 }
 
-async function isExecutable(path) {
-  if (typeof path !== 'string' || path.length === 0) return false;
-  try {
-    await access(path, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 // 与 Server 端共用设计 6.4 的解析顺序，避免两份实现漂移。
 // 注意：这是"存在性"快速选择，只用于把 CODEX_BIN 作为显式配置写进插件 env（优先级 0 的
 // 提前命中，属可选优化）。真正的能力探测在 Server 冷启动时执行（probeCodexRuntime），
 // 因此即使此处未命中，运行时仍会自动发现。
 export async function discoverCodexBinary({ env = process.env } = {}) {
-  return discoverCodexBinaryShared({ env, exists: isExecutable });
+  return discoverCodexBinaryShared({ env });
 }
 
 // 把插件里的裸命令改写成 `node <cli>`，使插件不依赖 PATH 解析我们的命令。
@@ -97,7 +87,7 @@ export function localizeMcpConfig(mcp, { cliPath = CLI_ENTRY, env = {} } = {}) {
     ...current,
     type: 'stdio',
     command: process.execPath,
-    args: [cliPath, 'mcp'],
+    args: [cliPath, ...(Array.isArray(current.args) ? current.args : ['mcp'])],
     ...(Object.keys(env).length > 0 ? { env: { ...(current.env ?? {}), ...env } } : {}),
   };
   return { ...mcp, mcpServers: servers };

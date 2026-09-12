@@ -17,6 +17,10 @@ export const BLOCK_DELIVERY_EVENTS = Object.freeze(new Set(['PreToolUse', 'Stop'
 // 门禁仅针对真正准备执行的 CAS MCP 工具）。
 export const SESSION_GATE_EVENT = 'PreToolUse';
 
+// Mailbox 回流的消费窗口：kimi 注册的三个事件全部承担回流
+// （PreToolUse/Stop 走 exit 2 block，UserPromptSubmit 走 stdout）。
+export const DELIVERY_EVENTS = Object.freeze(new Set(['PreToolUse', 'Stop', 'UserPromptSubmit']));
+
 function optionalString(value) {
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
@@ -46,5 +50,6 @@ export default Object.freeze({
   parseHookInvocation,
   blockDeliveryEvents: BLOCK_DELIVERY_EVENTS,
   sessionGateEvent: SESSION_GATE_EVENT,
+  deliveryEvents: DELIVERY_EVENTS,
   gateVetoText,
 });

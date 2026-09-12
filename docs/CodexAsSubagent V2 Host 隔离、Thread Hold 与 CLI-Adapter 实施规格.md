@@ -1311,6 +1311,21 @@ parseHookInvocation({
 }
 ```
 
+除 `parseHookInvocation` 外，每个 Adapter 还静态声明三个协议字段（ZCode 集成轮补齐）：
+
+```text
+sessionGateEvent      → CAS Session Gate 挂载的 Hook 事件（两 Host 均为 PreToolUse）
+blockDeliveryEvents   → 使用 exit 2 block 语义投递的事件
+                        （kimi-code: PreToolUse/Stop；zcode: 空集——全部 stdout JSON + exit 0）
+deliveryEvents        → Mailbox 回流消费窗口
+                        （kimi-code: PreToolUse/Stop/UserPromptSubmit；
+                          zcode: UserPromptSubmit/PostToolUse/Stop，
+                          PreToolUse 仅门禁不做回流——其 stdout 注入行为未实证，
+                          避免 claim 后被宿主丢弃）
+```
+
+veto 文案由 `gateVetoText(kind)`（occupied / missing_session / unavailable）产出，写 stderr 并以 exit 2 阻断（两 Host 的 exit 2 语义均为"阻断"）。
+
 Host Adapter 只负责 native 字段提取。
 
 Workspace canonicalization 统一由：
