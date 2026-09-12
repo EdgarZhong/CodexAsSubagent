@@ -9,19 +9,20 @@
   3. `docs/CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格.md`
 - V1 详细设计已降级为基线规格（`docs/Codex As Subagent — 详细设计与编码规格.md`，被取代小节已移除）；V1 已全部交付并通过用户级验收，证据见 docs/autonomous-runs/。
 - 执行方式（用户 2026-09-12 指令）：自主实现流程中**独立 Review Agent 取消**，全部复核与验收由主会话承担；subagent 只负责必要的 explore 与实现；使用 ZCode 原生子代理，不使用 Codex。
-- 环境事实：本机 Codex runtime 为 ChatGPT.app 内嵌 0.153.4；确定性回归基线为 V1 末期 149/149（V2 改造后以新全量为准）。
+- 环境事实：本机 Codex runtime 为 ChatGPT.app 内嵌 0.153.4；确定性回归基线为 V2 实现 233/233（2026-09-12）。
 
 ## V2 任务看板
 
 - [x] 三份 V2 规格按最终修订指令合并为唯一自洽版本（含 `current_session` 持久化、破坏性重建、Runtime 内部 Web delivery、Fail-Closed/Recovery Matrix、Host 产品定义；Doc A 改名去 "(1)"）。
 - [x] V1 详细设计精简为基线规格；Kimi 知识库加 V2 状态标注；三份核心文档同步。
-- [ ] T1 SQLite V2 schema 重建与 Host-scope Store API（executions/completions + host/session_id，thread_holds、host_presence、current_sessions；claim/ack/nack/gate 全谓词 host 化）。
-- [ ] T2 Runtime core 隔离逻辑（spawn/send Hold 算法、thread_held、steer/interrupt/wait/status/read_thread/list_threads 门禁、session_not_established、Recovery §2.10/§3.2）。
-- [ ] T3 Host Protocol Registry + CLI 协议（src/hosts/{registry,kimi-code,zcode}；hook `--host` 必填、drain 三参必填、mcp `--host` 必填 + Presence heartbeat）。
-- [ ] T4 Kimi Web 事件驱动投递（terminal COMMIT → claim → push → ACK/NACK/lease；单 active Server 假设；移除 legacy kimi-web CLI/worker/registry）。
-- [ ] T5 Kimi 插件资源与安装器更新（attach/detach hook 移除、MCP 注册带 `--host=kimi-code`）。
-- [ ] 主会话集成复核、全量回归（npm test / lint / smoke）、验收记录写入 docs/autonomous-runs/。
-- [ ] 用户级验收：真实 Kimi TUI/Web E2E 由用户执行（同 V1 惯例）；ZCode 插件集成与 E2E 单独一轮。
+- [x] T1 SQLite V2 schema 重建与 Host-scope Store（executions/completions + host/session_id，thread_holds、host_presence、current_sessions；claim/ack/nack/gate 全谓词 host 化；破坏性重建，schema_version='2'）。
+- [x] T2 Runtime core 隔离逻辑（SessionContext 解析与 `session_not_established`、send A–F Hold 算法、新 Hold 后失败按 hold_id 释放、steer/interrupt/wait/status/read_thread/list_threads 的 `thread_held` 语义、provenance 继承/显式透传、recovery 修复 current_session 且不重置 Presence/Hold）。
+- [x] T3 Host Protocol Registry + CLI 协议（src/hosts/{registry,kimi-code,zcode}；hook `--host` 必填 + PreToolUse 双职责固定顺序 + gate 异常 fail closed；drain 三参必填；mcp `--host` 必填 + Presence 注册后处理调用、20s 直写 heartbeat、退出 detach；`delivery.nack` 接线）。
+- [x] T4 Kimi Web 事件驱动投递（terminal COMMIT → claim `claimed_hook` → 单 active Server 判定/`multiple_active_host_servers` → session 归属校验 → prompt/steer → ACK/NACK/lease；`claimed_direct` 排除；legacy kimi-web CLI/worker/registry 移除并归档 .archive/v2-removed/）。
+- [x] T5 Kimi 插件资源与安装器（hooks 恰为 PreToolUse/Stop/UserPromptSubmit；MCP 注册 args `["mcp","--host=kimi-code"]`；README/SYSTEM 更新）。
+- [x] T6 主会话集成与回归：serve 接入 webDelivery/recovery logger、install 文案修补；`npm test` 233/233、lint/smoke/doctor 通过；真实 SQLite 端到端探针（隔离/门禁/接管/回流/跨 session 不串投）通过；验收记录 docs/autonomous-runs/20260912-1610-v2-host-session-isolation.md。
+- [ ] 用户级验收：真实 Kimi TUI/Web E2E 由用户执行（重装插件 → 重启宿主 → TUI PreToolUse 回流；Web 验证 `--host=kimi-code` MCP 与事件驱动投递回原 session）。
+- [ ] ZCode 插件集成与真实 E2E（单独一轮；现有 ZCode 安装在 V2 下暂时不可用，为已接受状态）。
 
 ### Backlog（承接 V1 未完成项）
 
@@ -62,6 +63,7 @@
 6. **CLI 协议**：`serve` 禁止 `--host/--workspace/--session`；`mcp --host` 必填、 Presence 注册成功后才处理调用、退出 best-effort detach；`hook --host` 必填、移除 plain fallback 与 `--workspace` override；`drain --host/--workspace/--session` 三项必填。
 7. **Host 身份**：Host 是产品类型（kimi-code/zcode/...），由 Host integration 静态指定，不得从 cwd/session/进程名/工具参数推断；未知 Host 在任何 CAS 状态读写前 `UnknownHostError` fail closed；TUI/Web 统一 `kimi-code`，`kimi-code-web`/`kimi-code-tui` 禁止。
 8. **文档裁决**：三份 V2 文稿为唯一权威，V1 设计降级基线；`src/hosts/<host>.mjs` 是 Host-native 字段唯一出现处，`cli/hook.mjs` 不直接读 Host-native 字段；禁止以 legacy 代码反推产品设计，代码与规范冲突时改代码。
+9. **实现边界裁决（2026-09-12，逐条证据见验收记录 §五）**：Hold 接管为"快照读 → 事务外 presence 判定 → CAS 写 + 冲突重读"；Gate 空闲竞争按懒切换语义（先后 allow）；heartbeat UPDATE-only（`refreshed:false` 由调用方重挂）；`resumeThread` 失败同样释放本次新 Hold；无法确定唯一 holder 的 `thread_held` 不带 `data.holderHost`；provenance 显式事件值优先、行一致性校验 fail closed；gate 求值失败 veto（fail closed）、回流渲染失败 fail-open；kimi-web legacy 文件移入 `.archive/v2-removed/`。
 
 ## 执行边界
 
