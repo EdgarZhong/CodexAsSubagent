@@ -1,16 +1,22 @@
 export const ERROR_CODES = Object.freeze({
   DEFAULT_MODEL_UNAVAILABLE: 'default_model_unavailable',
   HISTORY_UNAVAILABLE: 'history_unavailable',
+  HOST_REQUIRED: 'host_required',
   INVALID_EFFORT: 'invalid_effort',
   INVALID_MODEL: 'invalid_model',
   INVALID_TERMINAL_RESULT: 'invalid_terminal_result',
   INVALID_TERMINAL_STATUS: 'invalid_terminal_status',
+  MULTIPLE_ACTIVE_HOST_SERVERS: 'multiple_active_host_servers',
   NO_ACTIVE_TURN: 'no_active_turn',
+  SESSION_CONFLICT: 'session_conflict',
+  SESSION_NOT_ESTABLISHED: 'session_not_established',
   SUPERVISOR_UNAVAILABLE: 'supervisor_unavailable',
   THREAD_BUSY: 'thread_busy',
+  THREAD_HELD: 'thread_held',
   THREAD_LOCKED: 'thread_locked',
   THREAD_NOT_FOUND: 'thread_not_found',
   THREAD_WORKSPACE_MISMATCH: 'thread_workspace_mismatch',
+  UNKNOWN_HOST: 'unknown_host',
   WORKSPACE_UNAVAILABLE: 'workspace_unavailable',
 });
 
@@ -76,6 +82,41 @@ export class HistoryUnavailableError extends DomainError {
 export class SupervisorUnavailableError extends DomainError {
   constructor(message = 'Supervisor adapter is unavailable.') {
     super(ERROR_CODES.SUPERVISOR_UNAVAILABLE, message);
+  }
+}
+
+// ctx 缺失 host（bootstrap 未提供）时 fail closed（规格 §2.2：Host 必须静态指定，
+// 不得从 cwd/session/参数推断）。
+export class HostRequiredError extends DomainError {
+  constructor(message = 'A host context is required for this operation.') {
+    super(ERROR_CODES.HOST_REQUIRED, message);
+  }
+}
+
+// 弱 Host 无 current_session 时的正式行为（架构设计 §四）：self-recovering admission
+// failure，恢复路径固定为重新经 PreToolUse Session Gate 建立 current_session 后重试。
+export class SessionNotEstablishedError extends DomainError {
+  constructor(message = 'Session is not established for this host and workspace. Establish the current session through the PreToolUse Session Gate, then retry.') {
+    super(ERROR_CODES.SESSION_NOT_ESTABLISHED, message);
+  }
+}
+
+// CAS Host Ownership 层的跨 Host 控制权冲突（实施规格 §3.10）。
+// message 固定，holderHost 只能通过 data 携带；MCP 投影必须保留 error.data。
+export class ThreadHeldError extends DomainError {
+  constructor(holderHost) {
+    super(ERROR_CODES.THREAD_HELD, 'Thread is currently held by another host.', {
+      data: { holderHost },
+    });
+  }
+}
+
+// 未知 Host（实施规格 §3.2）：Host 是产品类型，只能取自 Host Protocol Registry；
+// 未知 --host 必须在任何 CAS 状态读写之前失败（fail closed）。
+export class UnknownHostError extends DomainError {
+  constructor(hostId, { knownHostIds = [] } = {}) {
+    const known = knownHostIds.length > 0 ? ` Known hosts: ${knownHostIds.join(', ')}.` : '';
+    super(ERROR_CODES.UNKNOWN_HOST, `Unknown host: ${hostId ?? '(missing)'}.${known}`);
   }
 }
 

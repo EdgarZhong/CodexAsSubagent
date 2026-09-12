@@ -34,12 +34,16 @@ export class CompletionStore {
     return this.store.insertCompletionFirst(terminalInput(first, second));
   }
 
-  claimPendingHook(first, second = {}) {
-    return this.store.claimPendingHook(first, second);
+  claimPendingHook(input = {}) {
+    return this.store.claimPendingHook(input);
   }
 
-  ackDelivery(first, second) {
-    return this.store.ackDelivery(first, second);
+  ackDelivery(input = {}) {
+    return this.store.ackDelivery(input);
+  }
+
+  nackDelivery(input = {}) {
+    return this.store.nackDelivery(input);
   }
 
   requeueExpiredLeases(options = {}) {

@@ -51,21 +51,24 @@ function validateArguments(name, args) {
   return args;
 }
 
+// 进程内直连路径：ctx 协议与 RequestRouter 一致——调用方提供 {host, workspace}，
+// 在此处统一经 runtime.sessionContext() 解析 SessionContext（缺失 → session_not_established）。
 export async function handleToolCall(name, args, ctx = {}) {
   const runtime = ctx.runtime;
   if (!runtime) throw new DomainError('supervisor_unavailable', 'Runtime Manager is unavailable.');
   const input = validateArguments(name, args === undefined ? {} : args);
+  const session = await runtime.sessionContext(ctx);
   switch (name) {
-    case 'codex_spawn': return projectSpawnAck(await runtime.spawn(ctx, input));
-    case 'codex_send': return projectSpawnAck(await runtime.send(ctx, input));
-    case 'codex_steer': return projectPublic(await runtime.steer(ctx, input));
-    case 'codex_status': return projectStatus(await runtime.status(ctx, input.threadId));
-    case 'codex_wait': return projectTerminalResult(await runtime.wait(ctx, input.threadId));
-    case 'codex_wait_many': return projectWaitMany(await runtime.waitMany(ctx, input.threads));
-    case 'codex_interrupt': return projectInterrupt(await runtime.interrupt(ctx, input.threadId));
-    case 'codex_list_threads': return projectListThreads(await runtime.listThreads(ctx));
-    case 'codex_read_thread': return projectReadThread(await runtime.readThread(ctx, input.threadId));
-    case 'codex_models': return projectModels(await runtime.models());
+    case 'codex_spawn': return projectSpawnAck(await runtime.spawn(session, input));
+    case 'codex_send': return projectSpawnAck(await runtime.send(session, input));
+    case 'codex_steer': return projectPublic(await runtime.steer(session, input));
+    case 'codex_status': return projectStatus(await runtime.status(session, input.threadId));
+    case 'codex_wait': return projectTerminalResult(await runtime.wait(session, input.threadId));
+    case 'codex_wait_many': return projectWaitMany(await runtime.waitMany(session, input.threads));
+    case 'codex_interrupt': return projectInterrupt(await runtime.interrupt(session, input.threadId));
+    case 'codex_list_threads': return projectListThreads(await runtime.listThreads(session));
+    case 'codex_read_thread': return projectReadThread(await runtime.readThread(session, input.threadId));
+    case 'codex_models': return projectModels(await runtime.models(session));
     default: throw new DomainError('tool_not_found', `Unknown tool: ${name}`);
   }
 }

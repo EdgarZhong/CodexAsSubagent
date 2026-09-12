@@ -1,9 +1,8 @@
 import { access, copyFile, cp, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-
-import { DEFAULT_KIMI_CODE_HOME } from '../hook/kimi-web.mjs';
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const PLUGIN_SOURCE_DIR = join(REPO_ROOT, 'plugins', 'kimi-code');
@@ -13,6 +12,8 @@ export const PLUGIN_NAME = 'codex-as-subagent';
 // MCP 必须注册在用户级 mcp.json（宿主以 workspace.cwd 作为 stdio 默认工作目录），
 // 插件 manifest 只承载 hooks / system prompt 等与 cwd 无关的资源。
 export const USER_MCP_SERVER_NAME = PLUGIN_NAME;
+// Kimi 用户级配置根目录（V2 中由安装器自有定义，不再依赖已废除的 legacy kimi-web 模块）。
+export const DEFAULT_KIMI_CODE_HOME = join(homedir(), '.kimi-code');
 export const USER_MCP_STARTUP_TIMEOUT_MS = 60000;
 // CAS codex_wait/wait_many 协议上限 500s，超时需覆盖协议上限并留传输余量（知识库 §19）。
 export const USER_MCP_TOOL_TIMEOUT_MS = 520000;
@@ -87,7 +88,8 @@ function hookCommand(command, { cliPath, execPath }) {
 export function buildUserMcpServerEntry({ cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
   return {
     command: execPath,
-    args: [cliPath, 'mcp'],
+    // V2：mcp --host 必填，Kimi 统一 host = kimi-code（TUI/Web 同一 Host）。
+    args: [cliPath, 'mcp', '--host=kimi-code'],
     startupTimeoutMs: USER_MCP_STARTUP_TIMEOUT_MS,
     toolTimeoutMs: USER_MCP_TOOL_TIMEOUT_MS,
   };

@@ -8,6 +8,7 @@ import { createCompletionStore } from '../core/completion-store.mjs';
 import { createExecutionStore } from '../core/execution-store.mjs';
 import { ModelService } from '../core/model-service.mjs';
 import { createRuntimeManager } from '../core/runtime-manager.mjs';
+import { createWebDelivery } from '../core/web-delivery.mjs';
 import { WorkspaceGuard } from '../core/workspace-guard.mjs';
 import { createHistoryAdapter } from '../adapters/supervisor/history-adapter.mjs';
 import { createRuntimeServer } from '../server/server.mjs';
@@ -46,7 +47,10 @@ export async function serve(argv = []) {
   });
   const executions = createExecutionStore(store);
   const completions = createCompletionStore(store);
-  const router = createCompletionRouter({ executions, completions });
+  // V2 §十四：Web 回流是 Runtime 内部事件驱动 delivery——terminal durable COMMIT 后
+  // 对仍 pending 的 kimi-code completion fire-and-forget 投递，COMMIT 先于任何外部副作用。
+  const webDelivery = createWebDelivery({ store, logger });
+  const router = createCompletionRouter({ executions, completions, webDelivery, logger });
   const history = createHistoryAdapter(adapter);
   const runtime = createRuntimeManager({
     adapter,
@@ -58,7 +62,7 @@ export async function serve(argv = []) {
     historyAdapter: history,
     ownerInstanceId: randomUUID(),
   });
-  await recoverState({ executionStore: executions, historyAdapter: history, completionRouter: router });
+  await recoverState({ executionStore: executions, historyAdapter: history, completionRouter: router, logger });
   let storeClosed = false;
   const server = createRuntimeServer({
     runtime,

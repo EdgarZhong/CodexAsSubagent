@@ -226,7 +226,7 @@ function terminalStatus(event, evidence, suppliedResult) {
 function storesFrom(options) {
   if (options && typeof options.insertCompletionFirst === 'function') {
     const isSqliteStore = typeof options.createExecution === 'function'
-      && typeof options.getExecution === 'function';
+      && typeof options.getExecutionByPhysicalThreadId === 'function';
     return {
       completions: options instanceof CompletionStore ? options : new CompletionStore(options),
       executions: isSqliteStore ? new ExecutionStore(options) : null,
@@ -251,11 +251,17 @@ function storesFrom(options) {
 
 export class CompletionRouter {
   constructor(options, completionStore) {
-    const stores = completionStore === undefined
+    const single = completionStore === undefined;
+    const stores = single
       ? storesFrom(options)
       : storesFrom({ executions: options, completions: completionStore });
     this.completions = stores.completions;
     this.executions = stores.executions;
+    // V2 事件驱动 Web delivery（适配说明 §四）：经构造参数注入，缺省 undefined
+    // 表示不启用，保持纯 store 路径可测。
+    const extras = single && isRecord(options) && !Array.isArray(options) ? options : {};
+    this.webDelivery = extras.webDelivery ?? null;
+    this.logger = extras.logger ?? null;
   }
 
   onTerminal(event = {}) {
@@ -286,7 +292,9 @@ export class CompletionRouter {
     const threadId = firstString(...threadIds);
     if (!threadId) return null;
 
-    const knownExecution = this.executions?.getExecution(threadId) ?? null;
+    // onTerminal 只出现在 trusted supervisor event path / recovery（规格 §2.8），
+    // 是唯一允许按物理 Thread ID 关联 Execution 的内部例外。
+    const knownExecution = this.executions?.getExecutionByPhysicalThreadId(threadId) ?? null;
     const eventTurnId = firstString(...eventEvidence.turnIds);
     const executionEvidence = knownExecution
       ? validateEvidence(knownExecution, 'execution', { active: true, includeRootType: true }) : null;
@@ -321,14 +329,54 @@ export class CompletionRouter {
     const safeTerminalResult = !suppliedResult && !event.turn && isRecord(event.changes)
       ? new TerminalResult({ ...terminalResult.toJSON(), changes: event.changes })
       : terminalResult;
-    return this.completions.insertCompletionFirst({
+    // provenance（规格 §2.4）：事件显式携带 host/workspace/sessionId 时原样透传
+    // （由 insertCompletionFirst 与 execution 行做一致性校验，冲突 fail closed）；
+    // 未携带时从 execution 行继承；无 Execution 的 trusted/recovery 合成路径缺失
+    // provenance 时 insertCompletionFirst fail closed。
+    const completion = this.completions.insertCompletionFirst({
       ...event,
       threadId,
       turnId,
+      host: event.host ?? knownExecution?.host,
       workspace: event.workspace ?? knownExecution?.workspace,
+      sessionId: event.sessionId ?? knownExecution?.sessionId,
       status,
       terminalResult: safeTerminalResult,
     });
+    this.#attemptWebDelivery(completion);
+    return completion;
+  }
+
+  // V2 事件驱动 Web delivery（适配说明 §四）：Mailbox durable COMMIT（
+  // insertCompletionFirst 事务）成功之后，对本次新落库、仍为 pending 且
+  // host=kimi-code 的 completion fire-and-forget 触发。不得 await——不得阻塞
+  // terminal 响应，也不改变 idle 判定语义；投递失败由 web-delivery 内部记录
+  // 到 server.log，进程异常靠 delivery lease 过期回退。
+  #attemptWebDelivery(completion) {
+    const delivery = this.webDelivery;
+    if (!delivery || typeof delivery.attemptWebDelivery !== 'function') return;
+    if (!isRecord(completion) || completion.inserted === false) return;
+    if (completion.host !== 'kimi-code' || completion.deliveryState !== 'pending') return;
+    let promise;
+    try {
+      promise = delivery.attemptWebDelivery({ completion });
+    } catch (error) {
+      this.#logWebDeliveryFailure(error);
+      return;
+    }
+    if (promise && typeof promise.catch === 'function') {
+      promise.catch((error) => this.#logWebDeliveryFailure(error));
+    }
+  }
+
+  #logWebDeliveryFailure(error) {
+    try {
+      this.logger?.warn?.('completion.web_delivery.unhandled_failure', {
+        error: error?.message ?? String(error),
+      });
+    } catch {
+      // 日志失败不得影响 terminal 路径。
+    }
   }
 }
 

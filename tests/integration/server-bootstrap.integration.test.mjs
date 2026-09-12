@@ -34,6 +34,9 @@ test('RuntimeServer routes correlated requests over newline-delimited Unix socke
     executionStore: { listExecutions: () => [] },
     completionStore: { listCompletions: () => [] },
     close() {},
+    async sessionContext(context) {
+      return { host: context.host, workspace: context.workspace, sessionId: 'session-A' };
+    },
     async spawn(ctx, params) { calls.push(['spawn', ctx, params]); return { threadId: 't-1', status: 'running' }; },
     deliveryIdFor() { return null; },
     ackDeliveryId() { return false; },
@@ -46,10 +49,14 @@ test('RuntimeServer routes correlated requests over newline-delimited Unix socke
       id: 7,
       method: 'runtime.spawn',
       params: { prompt: 'hello' },
-      context: { workspace: '/workspace/current' },
+      context: { host: 'kimi-code', workspace: '/workspace/current' },
     });
     assert.deepEqual(response, { id: 7, result: { threadId: 't-1', status: 'running' } });
-    assert.deepEqual(calls, [['spawn', { workspace: '/workspace/current' }, { prompt: 'hello' }]]);
+    assert.deepEqual(calls, [[
+      'spawn',
+      { host: 'kimi-code', workspace: '/workspace/current', sessionId: 'session-A' },
+      { prompt: 'hello' },
+    ]]);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
@@ -60,14 +67,18 @@ test('StdioBootstrap removes hidden delivery id and ACKs only after stdout write
   const dir = await mkdtemp(join(tmpdir(), 'codex-bootstrap-'));
   const socketPath = join(dir, 'server.sock');
   const acked = [];
+  const nacked = [];
   const runtime = {
     executionStore: { listExecutions: () => [] },
     completionStore: { listCompletions: () => [] },
     close() {},
+    async sessionContext(context) {
+      return { host: context.host, workspace: context.workspace, sessionId: 'session-A' };
+    },
     async wait() { return { threadId: 't-1', status: 'completed' }; },
     deliveryIdFor(value) { return value?.status === 'completed' ? 'delivery-1' : null; },
-    ackDeliveryId(id) { acked.push(id); return true; },
-    releaseDeliveryId() { return false; },
+    ackDeliveryId(id, host) { acked.push([id, host]); return true; },
+    releaseDeliveryId(id, host) { nacked.push([id, host]); return true; },
   };
   const server = new RuntimeServer({ runtime, idleShutdownMs: 100_000 });
   const output = new PassThrough();
@@ -82,10 +93,12 @@ test('StdioBootstrap removes hidden delivery id and ACKs only after stdout write
       stdout: output,
       ensure: async () => {},
     });
-    const response = await bootstrap.handleRequest({ id: 1, method: 'runtime.wait', params: { threadId: 't-1' } }, { workspace: process.cwd() });
+    const context = { host: 'zcode', workspace: process.cwd() };
+    const response = await bootstrap.handleRequest({ id: 1, method: 'runtime.wait', params: { threadId: 't-1' } }, context);
     assert.deepEqual(response, { id: 1, result: { threadId: 't-1', status: 'completed' } });
     assert.deepEqual(JSON.parse(outputText.trim()), response);
-    assert.deepEqual(acked, ['delivery-1']);
+    assert.deepEqual(acked, [['delivery-1', 'zcode']]);
+    assert.deepEqual(nacked, []);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });

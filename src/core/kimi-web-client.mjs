@@ -1,14 +1,23 @@
-import { randomUUID } from 'node:crypto';
 import { readdir, readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 
-import { openSqliteStore, DEFAULT_DATA_DIR } from '../adapters/sqlite/sqlite-store.mjs';
-import { createCompletionStore } from '../core/completion-store.mjs';
-import { renderCompletions } from './render-completions.mjs';
+// V2 Kimi Web 集成（适配说明 §四）：本模块只保留 Server discovery 原语与
+// session-addressed HTTP client。legacy 的 detached worker / 轮询循环 /
+// worker registry 已废除，Web 回流由 src/core/web-delivery.mjs 事件驱动。
 
 export const KIMI_WEB_MODEL = 'kimi-code/kimi-for-coding';
 export const DEFAULT_KIMI_CODE_HOME = join(homedir(), '.kimi-code');
+
+// KIMI_CODE_HOME 解析（自 legacy src/cli/kimi-web.mjs 迁移）：
+// 显式参数 > 环境变量 > 用户默认目录。
+export function resolveKimiCodeHome(options = {}) {
+  const explicit = options.kimiCodeHome;
+  if (typeof explicit === 'string' && explicit.length > 0) return resolve(explicit);
+  const envValue = options.env?.KIMI_CODE_HOME ?? process.env.KIMI_CODE_HOME;
+  if (typeof envValue === 'string' && envValue.length > 0) return resolve(envValue);
+  return DEFAULT_KIMI_CODE_HOME;
+}
 
 function requiredString(value, name) {
   if (typeof value !== 'string' || value.length === 0) throw new TypeError(`${name} must be a non-empty string.`);
@@ -48,7 +57,7 @@ function envelopeData(body, response, { idempotentCodes = [] } = {}) {
   return { accepted: true, idempotent: false, data: body?.data ?? body ?? null, code: body?.code ?? 0 };
 }
 
-function instanceBaseUrl(instance) {
+export function instanceBaseUrl(instance) {
   const raw = instance?.base_url
     ?? instance?.baseUrl
     ?? instance?.server_url
@@ -63,7 +72,7 @@ function instanceBaseUrl(instance) {
   }
 }
 
-function sessionWorkspace(session) {
+export function sessionWorkspace(session) {
   const value = session?.metadata?.cwd
     ?? session?.metadata?.workspace
     ?? session?.cwd
@@ -73,12 +82,14 @@ function sessionWorkspace(session) {
   return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-async function canonicalWorkspace(value, resolver = realpath) {
+export async function canonicalWorkspace(value, resolver = realpath) {
   requiredString(value, 'workspace');
   return resolve(await resolver(value));
 }
 
-async function readInstanceFiles(home, { readDir = readdir, readJsonFile = readFile } = {}) {
+// Server instance registry（知识库 §10.1）：$KIMI_CODE_HOME/server/instances/<serverId>.json。
+// JSON 无法解析的记录被跳过（不阻止发现其他实例），但仍会留在返回值之外由调用方计数。
+export async function readInstanceFiles(home, { readDir = readdir, readJsonFile = readFile } = {}) {
   const directory = join(home, 'server', 'instances');
   let entries;
   try {
@@ -184,6 +195,13 @@ export class KimiWebClient {
     return envelopeData(parsed, response, { idempotentCodes });
   }
 
+  // Session 归属校验入口（适配说明 §四：Web 投递前必须确认目标 Session 存在
+  // 且 workspace 与 completion 一致）。
+  async readSession({ sessionId = this.sessionId } = {}) {
+    requiredString(sessionId, 'sessionId');
+    return this.#request(`/api/v1/sessions/${encodeURIComponent(sessionId)}`);
+  }
+
   async readPromptQueue({ sessionId = this.sessionId } = {}) {
     requiredString(sessionId, 'sessionId');
     const result = await this.#request(`/api/v1/sessions/${encodeURIComponent(sessionId)}/prompts`);
@@ -232,93 +250,4 @@ export class KimiWebClient {
       data: submitted.data,
     };
   }
-}
-
-function completionText(completion) {
-  return renderCompletions([completion], 'plain');
-}
-
-function asNow(value) {
-  return typeof value === 'function' ? value() : (value ?? new Date());
-}
-
-function sleep(ms, signal) {
-  if (ms <= 0) return Promise.resolve();
-  return new Promise((resolveSleep) => {
-    const timer = setTimeout(resolveSleep, ms);
-    signal?.addEventListener('abort', () => {
-      clearTimeout(timer);
-      resolveSleep();
-    }, { once: true });
-  });
-}
-
-export async function runKimiWebWorker({
-  server = null,
-  sessionId,
-  workspace,
-  dataDir = DEFAULT_DATA_DIR,
-  kimiHome = DEFAULT_KIMI_CODE_HOME,
-  pollMs = 0,
-  fetchImpl = globalThis.fetch,
-  store,
-  client,
-  resolveWorkspace = realpath,
-  now = () => new Date(),
-  leaseMs,
-  signal,
-  sleepImpl = sleep,
-} = {}) {
-  requiredString(sessionId, 'sessionId');
-  const canonical = await canonicalWorkspace(workspace, resolveWorkspace);
-  const discovered = server ?? await discoverKimiServer({
-    home: kimiHome,
-    sessionId,
-    workspace: canonical,
-    fetchImpl,
-    resolveWorkspace,
-  });
-  if (!discovered) return { delivered: 0, model: KIMI_WEB_MODEL, reason: 'server_unavailable' };
-  const api = client ?? new KimiWebClient({ ...discovered, sessionId, fetchImpl });
-  const ownedStore = store ? null : openSqliteStore(dataDir);
-  const completionStore = store ?? createCompletionStore(ownedStore);
-  let delivered = 0;
-  let error = null;
-  try {
-    while (!signal?.aborted) {
-      const currentNow = asNow(now);
-      completionStore.requeueExpiredLeases?.({ now: currentNow, ...(leaseMs === undefined ? {} : { leaseMs }) });
-      const deliveryId = `kimi-web-${randomUUID()}`;
-      const rows = completionStore.claimPendingHook({
-        workspace: canonical,
-        host: 'kimi-code-web',
-        limit: 1,
-        deliveryId,
-        now: currentNow,
-      });
-      if (!Array.isArray(rows) || rows.length === 0) {
-        if (pollMs <= 0) break;
-        await sleepImpl(pollMs, signal);
-        continue;
-      }
-      const completion = rows[0];
-      try {
-        await api.submitCompletion({
-          sessionId,
-          completionId: completion.completionId,
-          text: completionText(completion),
-          model: KIMI_WEB_MODEL,
-        });
-        const ack = completionStore.ackDelivery({ deliveryId, now: asNow(now) });
-        if (!ack?.acknowledged) throw new Error('Kimi Web delivery was accepted but completion ACK failed.');
-        delivered += 1;
-      } catch (cause) {
-        error = cause;
-        break;
-      }
-    }
-  } finally {
-    ownedStore?.close();
-  }
-  return { delivered, model: KIMI_WEB_MODEL, ...(error ? { error } : {}) };
 }

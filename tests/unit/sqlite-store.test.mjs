@@ -4,14 +4,21 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 import { Worker } from 'node:worker_threads';
+import { DatabaseSync } from 'node:sqlite';
 
 import { SqliteStore } from '../../src/adapters/sqlite/sqlite-store.mjs';
 import { CompletionStore } from '../../src/core/completion-store.mjs';
 import { ExecutionStore } from '../../src/core/execution-store.mjs';
 import { TerminalResult } from '../../src/core/terminal-result.mjs';
 
+const T0 = '2026-09-12T00:00:00.000Z';
+
+function plusSeconds(iso, seconds) {
+  return new Date(Date.parse(iso) + seconds * 1000).toISOString();
+}
+
 async function openStore(t) {
-  const dataDir = await mkdtemp(join(tmpdir(), 'codex-as-subagent-task3-'));
+  const dataDir = await mkdtemp(join(tmpdir(), 'codex-as-subagent-v2-store-'));
   const store = SqliteStore.open(dataDir);
   t.after(() => {
     store.close();
@@ -37,7 +44,59 @@ function terminal(threadId, turnId, workspace, overrides = {}) {
   };
 }
 
-test('SqliteStore creates the durable schema and required SQLite pragmas', async (t) => {
+function executionInput(overrides = {}) {
+  return {
+    host: 'kimi-code',
+    workspace: '/workspace/main',
+    sessionId: 'session-a',
+    now: T0,
+    ...overrides,
+  };
+}
+
+function insertProvenancedCompletion(store, {
+  host = 'kimi-code',
+  workspace = '/workspace/main',
+  sessionId = 'session-a',
+  threadId,
+  turnId,
+  ...overrides
+}) {
+  return store.insertCompletionFirst({
+    host,
+    workspace,
+    sessionId,
+    ...terminal(threadId, turnId, workspace, overrides),
+  });
+}
+
+function nextMessage(worker) {
+  return new Promise((resolve, reject) => {
+    const onMessage = (message) => {
+      cleanup();
+      if (message.type === 'error') reject(new Error(message.message));
+      else resolve(message);
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onExit = (code) => {
+      cleanup();
+      reject(new Error(`race worker exited before result: ${code}`));
+    };
+    const cleanup = () => {
+      worker.off('message', onMessage);
+      worker.off('error', onError);
+      worker.off('exit', onExit);
+    };
+    worker.once('message', onMessage);
+    worker.once('error', onError);
+    worker.once('exit', onExit);
+  });
+}
+
+test('SqliteStore creates the V2 schema with host/session scoping and required pragmas', async (t) => {
   const { store } = await openStore(t);
 
   assert.equal(store.db.prepare('PRAGMA journal_mode').get().journal_mode, 'wal');
@@ -48,14 +107,40 @@ test('SqliteStore creates the durable schema and required SQLite pragmas', async
   const tables = store.db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
   ).all().map((row) => row.name);
-  assert.deepEqual(tables, ['completions', 'executions', 'meta']);
+  assert.deepEqual(tables, [
+    'completions',
+    'current_sessions',
+    'executions',
+    'host_presence',
+    'meta',
+    'thread_holds',
+  ]);
+
+  const executionColumns = store.db.prepare('PRAGMA table_info(executions)').all().map((row) => row.name);
+  assert.deepEqual(executionColumns, [
+    'thread_id',
+    'turn_id',
+    'host',
+    'workspace',
+    'session_id',
+    'owner_instance_id',
+    'model',
+    'effort',
+    'started_at',
+    'last_activity_at',
+    'reservation_id',
+    'reservation_kind',
+    'reservation_created_at',
+  ]);
 
   const completionColumns = store.db.prepare('PRAGMA table_info(completions)').all().map((row) => row.name);
   assert.deepEqual(completionColumns, [
     'completion_id',
     'thread_id',
     'turn_id',
+    'host',
     'workspace',
+    'session_id',
     'terminal_status',
     'payload_json',
     'delivery_state',
@@ -65,13 +150,124 @@ test('SqliteStore creates the durable schema and required SQLite pragmas', async
     'created_at',
   ]);
 
-  const indexes = store.db.prepare(
-    "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'completions_pending_workspace_idx'",
-  ).all();
-  assert.equal(indexes.length, 1);
+  const holdColumns = store.db.prepare('PRAGMA table_info(thread_holds)').all().map((row) => row.name);
+  assert.deepEqual(holdColumns, [
+    'thread_id',
+    'workspace',
+    'holder_host',
+    'hold_id',
+    'acquired_at',
+    'updated_at',
+  ]);
+
+  const indexNames = new Set(
+    store.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map((row) => row.name),
+  );
+  for (const required of [
+    'executions_scope_idx',
+    'completions_pending_scope_idx',
+    'thread_holds_holder_idx',
+    'host_presence_expiry_idx',
+  ]) {
+    assert.equal(indexNames.has(required), true, `missing index ${required}`);
+  }
+  assert.equal(indexNames.has('completions_pending_workspace_idx'), false);
+
+  assert.equal(
+    store.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value,
+    '2',
+  );
 });
 
-test('terminal completion commits before delivery and duplicate thread/turn is idempotent', async (t) => {
+test('legacy V1 databases are destructively rebuilt into the V2 schema on open', async (t) => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'codex-as-subagent-v1-legacy-'));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+
+  const legacy = new DatabaseSync(join(dataDir, 'state.sqlite'));
+  legacy.exec(`
+    CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE executions (
+      thread_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      workspace TEXT NOT NULL,
+      owner_instance_id TEXT NOT NULL,
+      model TEXT,
+      effort TEXT,
+      started_at TEXT NOT NULL,
+      last_activity_at TEXT NOT NULL,
+      reservation_id TEXT,
+      reservation_kind TEXT,
+      reservation_created_at TEXT,
+      PRIMARY KEY (thread_id, turn_id)
+    );
+    CREATE TABLE completions (
+      completion_id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      workspace TEXT NOT NULL,
+      terminal_status TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      delivery_state TEXT NOT NULL,
+      delivery_id TEXT,
+      delivery_started_at TEXT,
+      delivered_at TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (thread_id, turn_id)
+    );
+    CREATE INDEX completions_pending_workspace_idx
+      ON completions(workspace, delivery_state, created_at);
+    INSERT INTO meta(key, value) VALUES ('schema_version', '1');
+    INSERT INTO executions(thread_id, turn_id, workspace, owner_instance_id, started_at, last_activity_at)
+      VALUES ('legacy-thread', 'legacy-turn', '/legacy', 'legacy-instance', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO completions(
+      completion_id, thread_id, turn_id, workspace, terminal_status,
+      payload_json, delivery_state, created_at
+    ) VALUES (
+      'legacy-completion', 'legacy-thread', 'legacy-turn', '/legacy', 'completed',
+      '{}', 'delivered', '2026-01-01T00:00:00.000Z'
+    );
+  `);
+  legacy.close();
+
+  const store = SqliteStore.open(dataDir);
+  t.after(() => store.close());
+
+  assert.equal(
+    store.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value,
+    '2',
+  );
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM executions').get().count, 0);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+
+  const executionColumns = store.db.prepare('PRAGMA table_info(executions)').all().map((row) => row.name);
+  assert.equal(executionColumns.includes('host'), true);
+  assert.equal(executionColumns.includes('session_id'), true);
+
+  const indexNames = new Set(
+    store.db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all().map((row) => row.name),
+  );
+  assert.equal(indexNames.has('completions_pending_workspace_idx'), false);
+  assert.equal(indexNames.has('completions_pending_scope_idx'), true);
+
+  // 重建后的 V2 schema 完全可用。
+  store.createExecution(executionInput({ threadId: 'fresh-thread', turnId: 'fresh-turn' }));
+  assert.equal(store.getExecutionByPhysicalThreadId('fresh-thread').threadId, 'fresh-thread');
+
+  // meta 存在但缺 schema_version 同样触发废弃重建。
+  const dirNoVersion = await mkdtemp(join(tmpdir(), 'codex-as-subagent-v1-noversion-'));
+  t.after(() => rm(dirNoVersion, { recursive: true, force: true }));
+  const noVersion = new DatabaseSync(join(dirNoVersion, 'state.sqlite'));
+  noVersion.exec('CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
+  noVersion.close();
+  const rebuilt = SqliteStore.open(dirNoVersion);
+  t.after(() => rebuilt.close());
+  assert.equal(
+    rebuilt.db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get().value,
+    '2',
+  );
+});
+
+test('terminal completion inherits host/session provenance from its execution and is idempotent', async (t) => {
   const { store } = await openStore(t);
   const executions = new ExecutionStore(store);
   const completions = new CompletionStore(store);
@@ -79,13 +275,12 @@ test('terminal completion commits before delivery and duplicate thread/turn is i
   t.after(() => rm(workspace, { recursive: true, force: true }));
   await writeFile(join(workspace, 'pre-existing-dirty-file.mjs'), 'already here\n');
 
-  executions.createExecution({
+  executions.createExecution(executionInput({
+    workspace,
     threadId: 'thread-pending',
     turnId: 'turn-pending',
-    workspace,
     ownerInstanceId: 'instance-1',
-    now: '2026-09-11T00:00:00.000Z',
-  });
+  }));
 
   const first = completions.insertCompletionFirst(terminal(
     'thread-pending',
@@ -94,10 +289,13 @@ test('terminal completion commits before delivery and duplicate thread/turn is i
     { repositoryDiff: { files: ['pre-existing-dirty-file.mjs'] } },
   ));
   assert.equal(first.inserted, true);
+  assert.equal(first.host, 'kimi-code');
+  assert.equal(first.workspace, workspace);
+  assert.equal(first.sessionId, 'session-a');
   assert.equal(first.deliveryState, 'pending');
   assert.equal(first.payload.changes.files[0].path, 'turn-file.mjs');
   assert.doesNotMatch(JSON.stringify(first.payload), /pre-existing-dirty-file/);
-  assert.equal(executions.getExecution('thread-pending'), null);
+  assert.equal(store.getExecutionByPhysicalThreadId('thread-pending'), null);
 
   const duplicate = completions.insertCompletionFirst(terminal(
     'thread-pending',
@@ -109,34 +307,184 @@ test('terminal completion commits before delivery and duplicate thread/turn is i
   assert.equal(duplicate.completionId, first.completionId);
   assert.equal(duplicate.payload.finalAssistantMessage, 'turn complete');
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 1);
+
+  // 与 execution 归属冲突的显式 provenance 必须被拒绝。
+  executions.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-mismatch',
+    turnId: 'turn-mismatch',
+  }));
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      ...terminal('thread-mismatch', 'turn-mismatch', workspace),
+      host: 'zcode',
+    }),
+    /host/,
+  );
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      ...terminal('thread-mismatch', 'turn-mismatch', workspace),
+      sessionId: 'session-b',
+    }),
+    /session/,
+  );
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      ...terminal('thread-mismatch', 'turn-mismatch', workspace),
+      workspace: '/workspace/other',
+    }),
+    /workspace/,
+  );
+  assert.equal(store.getExecutionByPhysicalThreadId('thread-mismatch').turnId, 'turn-mismatch');
 });
 
-test('direct reservation uses compare-and-set, ACK is required, and expired leases requeue', async (t) => {
+test('trusted recovery path requires explicit provenance when no execution exists', async (t) => {
+  const { store } = await openStore(t);
+  const completions = new CompletionStore(store);
+
+  const recovered = completions.insertCompletionFirst({
+    host: 'kimi-code',
+    workspace: '/workspace/recovery',
+    sessionId: 'session-r',
+    ...terminal('recovery-thread', 'recovery-turn', '/workspace/recovery'),
+  });
+  assert.equal(recovered.inserted, true);
+  assert.equal(recovered.host, 'kimi-code');
+  assert.equal(recovered.sessionId, 'session-r');
+
+  assert.throws(
+    () => completions.insertCompletionFirst(terminal('no-provenance', 'turn', '/workspace/recovery')),
+    /host/,
+  );
+
+  // Trusted supervisor event path：按物理 thread id 取最新 execution，与 host 无关。
+  store.createExecution(executionInput({
+    host: 'zcode',
+    sessionId: 'session-z',
+    threadId: 'physical-thread',
+    turnId: 'turn-1',
+    now: plusSeconds(T0, 10),
+  }));
+  store.createExecution(executionInput({
+    host: 'zcode',
+    sessionId: 'session-z',
+    threadId: 'physical-thread',
+    turnId: 'turn-2',
+    now: plusSeconds(T0, 20),
+  }));
+  assert.equal(store.getExecutionByPhysicalThreadId('physical-thread').turnId, 'turn-2');
+  assert.equal(store.getExecutionByPhysicalThreadId('physical-thread', 'turn-1').turnId, 'turn-1');
+});
+
+test('SqliteStore rejects payload identity and status conflicts', async (t) => {
+  const { store } = await openStore(t);
+  const completions = new CompletionStore(store);
+  const provenance = { host: 'kimi-code', workspace: '/workspace/identity', sessionId: 'session-a' };
+  const canonical = new TerminalResult({
+    threadId: 'payload-thread',
+    status: 'completed',
+    finalAssistantMessage: 'safe',
+    changes: { files: [] },
+  });
+
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      ...provenance,
+      threadId: 'row-thread',
+      turnId: 'row-turn',
+      terminalResult: canonical,
+    }),
+    /threadId/,
+  );
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      ...provenance,
+      threadId: 'row-thread',
+      turnId: 'row-turn',
+      terminalResult: {
+        threadId: 'row-thread',
+        turnId: 'other-turn',
+        status: 'completed',
+        finalAssistantMessage: 'wrong turn identity',
+        changes: { files: [] },
+      },
+    }),
+    /turnId/,
+  );
+  assert.throws(
+    () => completions.insertCompletionFirst({
+      ...provenance,
+      threadId: 'row-thread',
+      turnId: 'row-turn',
+      status: 'failed',
+      terminalResult: new TerminalResult({
+        threadId: 'row-thread',
+        status: 'completed',
+        finalAssistantMessage: 'safe',
+        changes: { files: [] },
+      }),
+    }),
+    /status/,
+  );
+});
+
+test('direct reservation is host/session scoped, ACK requires host, and expired leases requeue globally', async (t) => {
   const { store } = await openStore(t);
   const executions = new ExecutionStore(store);
   const completions = new CompletionStore(store);
   const workspace = '/workspace/direct';
 
-  executions.createExecution({
+  executions.createExecution(executionInput({
+    workspace,
     threadId: 'thread-direct',
     turnId: 'turn-direct',
-    workspace,
     ownerInstanceId: 'instance-1',
-    now: '2026-09-11T00:00:00.000Z',
+  }));
+
+  const wrongHost = executions.reserveDirect({
+    host: 'zcode',
+    workspace,
+    sessionId: 'session-a',
+    threadId: 'thread-direct',
+    reservationId: 'wrong-host-reservation',
+    now: T0,
   });
+  assert.equal(wrongHost.reserved, false);
+  assert.equal(wrongHost.reason, 'host_mismatch');
+  assert.equal(wrongHost.holderHost, 'kimi-code');
+
+  const wrongSession = executions.reserveDirect({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-b',
+    threadId: 'thread-direct',
+    reservationId: 'wrong-session-reservation',
+    now: T0,
+  });
+  assert.equal(wrongSession.reserved, false);
+  assert.equal(wrongSession.reason, 'session_mismatch');
+  assert.equal(wrongSession.holderSessionId, 'session-a');
+
   const first = executions.reserveDirect({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
     threadId: 'thread-direct',
     reservationId: 'direct-reservation',
-    now: '2026-09-11T00:00:01.000Z',
+    now: plusSeconds(T0, 1),
   });
   const second = executions.reserveDirect({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
     threadId: 'thread-direct',
     reservationId: 'another-reservation',
-    now: '2026-09-11T00:00:02.000Z',
+    now: plusSeconds(T0, 2),
   });
   assert.equal(first.reserved, true);
   assert.equal(first.reservationId, 'direct-reservation');
   assert.equal(second.reserved, false);
+  assert.equal(second.reason, 'already_reserved');
 
   const completion = completions.insertCompletionFirst(terminal(
     'thread-direct',
@@ -146,20 +494,31 @@ test('direct reservation uses compare-and-set, ACK is required, and expired leas
   ));
   assert.equal(completion.deliveryState, 'claimed_direct');
   assert.equal(completion.deliveryId, 'direct-reservation');
-  assert.equal(completions.ackDelivery({ deliveryId: 'wrong-id' }), null);
-  assert.equal(completions.getCompletion('direct-completion').deliveryState, 'claimed_direct');
-  assert.equal(completions.ackDelivery({
-    deliveryId: 'direct-reservation',
-    now: '2026-09-11T00:00:03.000Z',
-  }).deliveryState, 'delivered');
 
-  executions.createExecution({
+  // ACK 必须匹配 host：错误 host + 正确 deliveryId 不生效；缺失 host 直接 fail closed。
+  assert.equal(completions.ackDelivery({ host: 'zcode', deliveryId: 'direct-reservation', now: T0 }), null);
+  assert.equal(completions.getCompletion('direct-completion').deliveryState, 'claimed_direct');
+  assert.throws(
+    () => completions.ackDelivery({ deliveryId: 'direct-reservation', now: T0 }),
+    /host/,
+  );
+  assert.equal(completions.getCompletion('direct-completion').deliveryState, 'claimed_direct');
+  assert.equal(
+    completions.ackDelivery({
+      host: 'kimi-code',
+      deliveryId: 'direct-reservation',
+      now: plusSeconds(T0, 3),
+    }).deliveryState,
+    'delivered',
+  );
+
+  // Hook claim 走完整谓词，lease 过期全局 requeue。
+  executions.createExecution(executionInput({
+    workspace,
     threadId: 'thread-hook-lease',
     turnId: 'turn-hook-lease',
-    workspace,
     ownerInstanceId: 'instance-1',
-    now: '2026-09-11T00:00:00.000Z',
-  });
+  }));
   const pending = completions.insertCompletionFirst(terminal(
     'thread-hook-lease',
     'turn-hook-lease',
@@ -168,15 +527,22 @@ test('direct reservation uses compare-and-set, ACK is required, and expired leas
   ));
   assert.equal(pending.deliveryState, 'pending');
   const [claimed] = completions.claimPendingHook({
+    host: 'kimi-code',
     workspace,
-    now: '2026-09-11T00:00:10.000Z',
+    sessionId: 'session-a',
+    now: plusSeconds(T0, 10),
   });
   assert.equal(claimed.deliveryState, 'claimed_hook');
-  assert.equal(completions.requeueExpiredLeases({
-    now: '2026-09-11T00:00:41.000Z',
-  }), 1);
+  assert.equal(completions.requeueExpiredLeases({ now: plusSeconds(T0, 41) }), 1);
   assert.equal(completions.getCompletion('hook-lease-completion').deliveryState, 'pending');
 
+  // Pending completion 抢占按 host+workspace+session 完整谓词。
+  executions.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-pending-direct',
+    turnId: 'turn-pending-direct',
+    ownerInstanceId: 'instance-1',
+  }));
   const pendingDirect = completions.insertCompletionFirst(terminal(
     'thread-pending-direct',
     'turn-pending-direct',
@@ -184,46 +550,112 @@ test('direct reservation uses compare-and-set, ACK is required, and expired leas
     { completionId: 'pending-direct-completion' },
   ));
   assert.equal(pendingDirect.deliveryState, 'pending');
-  const directClaim = executions.reserveDirect({
-    threadId: 'thread-pending-direct',
+  const excluded = executions.reserveDirect({
+    host: 'kimi-code',
     workspace,
+    sessionId: 'session-b',
+    threadId: 'thread-pending-direct',
     reservationId: 'pending-direct-reservation',
+    now: T0,
+  });
+  assert.equal(excluded.reserved, false);
+  assert.equal(excluded.reason, 'not_found');
+  const directClaim = executions.reserveDirect({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
+    threadId: 'thread-pending-direct',
+    reservationId: 'pending-direct-reservation',
+    now: T0,
   });
   assert.equal(directClaim.source, 'completion');
   assert.equal(completions.getCompletion('pending-direct-completion').deliveryState, 'claimed_direct');
-  assert.equal(executions.releaseReservation({ reservationId: 'pending-direct-reservation' }).released, true);
+  assert.equal(
+    executions.releaseReservation({ host: 'kimi-code', reservationId: 'pending-direct-reservation' }).released,
+    true,
+  );
   assert.equal(completions.getCompletion('pending-direct-completion').deliveryState, 'pending');
 
-  executions.createExecution({
+  // Direct lease 过期边界。
+  executions.createExecution(executionInput({
+    workspace,
     threadId: 'thread-direct-lease',
     turnId: 'turn-direct-lease',
-    workspace,
     ownerInstanceId: 'instance-1',
-    now: '2026-09-11T00:00:00.000Z',
-  });
+  }));
   executions.reserveDirect({
+    host: 'kimi-code',
+    workspace,
+    sessionId: 'session-a',
     threadId: 'thread-direct-lease',
     reservationId: 'direct-lease-reservation',
-    now: '2026-09-11T00:00:00.000Z',
+    now: T0,
   });
   const directLease = completions.insertCompletionFirst(terminal(
     'thread-direct-lease',
     'turn-direct-lease',
     workspace,
-    {
-      completionId: 'direct-lease-completion',
-      now: '2026-09-11T00:00:00.000Z',
-    },
+    { completionId: 'direct-lease-completion', now: T0 },
   ));
   assert.equal(directLease.deliveryState, 'claimed_direct');
-  assert.equal(completions.requeueExpiredLeases({
-    now: '2026-09-11T00:00:29.999Z',
-  }), 0);
+  assert.equal(completions.requeueExpiredLeases({ now: plusSeconds(T0, 29.999) }), 0);
   assert.equal(completions.getCompletion('direct-lease-completion').deliveryState, 'claimed_direct');
-  assert.equal(completions.requeueExpiredLeases({
-    now: '2026-09-11T00:00:30.000Z',
-  }), 1);
+  assert.equal(completions.requeueExpiredLeases({ now: plusSeconds(T0, 30) }), 1);
   assert.equal(completions.getCompletion('direct-lease-completion').deliveryState, 'pending');
+});
+
+test('hook claims and nack are isolated across hosts and sessions', async (t) => {
+  const { store } = await openStore(t);
+  const completions = new CompletionStore(store);
+
+  insertProvenancedCompletion(store, { threadId: 'thread-h1', turnId: 'turn-h1' });
+  insertProvenancedCompletion(store, {
+    host: 'zcode',
+    sessionId: 'session-a',
+    threadId: 'thread-h2',
+    turnId: 'turn-h2',
+  });
+  insertProvenancedCompletion(store, { sessionId: 'session-b', threadId: 'thread-h3', turnId: 'turn-h3' });
+
+  const kimiClaims = completions.claimPendingHook({
+    host: 'kimi-code',
+    workspace: '/workspace/main',
+    sessionId: 'session-a',
+    deliveryId: 'hook-1',
+    now: T0,
+  });
+  assert.deepEqual(kimiClaims.map((row) => row.completionId), ['thread-h1-turn-h1-completion']);
+
+  const zcodeClaims = completions.claimPendingHook({
+    host: 'zcode',
+    workspace: '/workspace/main',
+    sessionId: 'session-a',
+    deliveryId: 'hook-2',
+    now: T0,
+  });
+  assert.deepEqual(zcodeClaims.map((row) => row.completionId), ['thread-h2-turn-h2-completion']);
+
+  const sessionBClaims = completions.claimPendingHook({
+    host: 'kimi-code',
+    workspace: '/workspace/main',
+    sessionId: 'session-b',
+    deliveryId: 'hook-3',
+    now: T0,
+  });
+  assert.deepEqual(sessionBClaims.map((row) => row.completionId), ['thread-h3-turn-h3-completion']);
+
+  assert.equal(completions.listCompletions({ host: 'kimi-code' }).length, 2);
+  assert.equal(completions.listCompletions({ host: 'kimi-code', sessionId: 'session-a' }).length, 1);
+  assert.equal(completions.listCompletions({ host: 'zcode' }).length, 1);
+
+  // NACK 同样必须匹配 host。
+  assert.equal(completions.nackDelivery({ host: 'zcode', deliveryId: 'hook-1' }), null);
+  assert.equal(completions.getCompletion('thread-h1-turn-h1-completion').deliveryState, 'claimed_hook');
+  const nacked = completions.nackDelivery({ host: 'kimi-code', deliveryId: 'hook-1' });
+  assert.equal(nacked.nacked, true);
+  assert.equal(nacked.deliveryState, 'pending');
+  assert.equal(nacked.deliveryId, null);
+  assert.equal(completions.getCompletion('thread-h1-turn-h1-completion').deliveryState, 'pending');
 });
 
 test('two racing Hook Workers can claim a pending completion only once', async (t) => {
@@ -231,12 +663,12 @@ test('two racing Hook Workers can claim a pending completion only once', async (
   const executions = new ExecutionStore(store);
   const completions = new CompletionStore(store);
   const workspace = '/workspace/hook-race';
-  executions.createExecution({
+  executions.createExecution(executionInput({
+    workspace,
     threadId: 'thread-race',
     turnId: 'turn-race',
-    workspace,
     ownerInstanceId: 'instance-1',
-  });
+  }));
   completions.insertCompletionFirst(terminal('thread-race', 'turn-race', workspace));
 
   const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
@@ -249,7 +681,9 @@ test('two racing Hook Workers can claim a pending completion only once', async (
       parentPort.postMessage({ type: 'ready' });
       Atomics.wait(new Int32Array(workerData.barrier), 0, 0);
       const claimed = store.claimPendingHook({
+        host: workerData.host,
         workspace: workerData.workspace,
+        sessionId: workerData.sessionId,
         deliveryId: workerData.deliveryId,
       });
       parentPort.postMessage({
@@ -262,35 +696,17 @@ test('two racing Hook Workers can claim a pending completion only once', async (
   `;
   const workers = ['hook-a', 'hook-b'].map((deliveryId) => new Worker(workerSource, {
     eval: true,
-    workerData: { barrier, dataDir, deliveryId, sqliteModule, workspace },
+    workerData: {
+      barrier,
+      dataDir,
+      deliveryId,
+      host: 'kimi-code',
+      sessionId: 'session-a',
+      sqliteModule,
+      workspace,
+    },
   }));
   t.after(() => Promise.all(workers.map((worker) => worker.terminate())));
-
-  function nextMessage(worker) {
-    return new Promise((resolve, reject) => {
-      const onMessage = (message) => {
-        cleanup();
-        if (message.type === 'error') reject(new Error(message.message));
-        else resolve(message);
-      };
-      const onError = (error) => {
-        cleanup();
-        reject(error);
-      };
-      const onExit = (code) => {
-        cleanup();
-        reject(new Error(`race worker exited before result: ${code}`));
-      };
-      const cleanup = () => {
-        worker.off('message', onMessage);
-        worker.off('error', onError);
-        worker.off('exit', onExit);
-      };
-      worker.once('message', onMessage);
-      worker.once('error', onError);
-      worker.once('exit', onExit);
-    });
-  }
 
   await Promise.all(workers.map((worker) => nextMessage(worker)));
   const results = workers.map((worker) => nextMessage(worker));
@@ -304,53 +720,547 @@ test('two racing Hook Workers can claim a pending completion only once', async (
   assert.equal(claimed.deliveryId, first.deliveryId ?? second.deliveryId);
 });
 
-test('SqliteStore rejects payload identity and status conflicts', async (t) => {
+test('session gate follows the four-branch state machine with atomic establishment', async (t) => {
   const { store } = await openStore(t);
-  const completions = new CompletionStore(store);
-  const canonical = new TerminalResult({
-    threadId: 'payload-thread',
-    status: 'completed',
-    finalAssistantMessage: 'safe',
-    changes: { files: [] },
-  });
+  const host = 'kimi-code';
+  const workspace = '/workspace/gate';
 
-  assert.throws(
-    () => completions.insertCompletionFirst({
-      threadId: 'row-thread',
-      turnId: 'row-turn',
-      workspace: '/workspace/identity',
-      terminalResult: canonical,
-    }),
-    /threadId/,
-  );
-  assert.throws(
-    () => completions.insertCompletionFirst({
-      threadId: 'row-thread',
-      turnId: 'row-turn',
-      workspace: '/workspace/identity',
-      terminalResult: {
-        threadId: 'row-thread',
-        turnId: 'other-turn',
-        status: 'completed',
-        finalAssistantMessage: 'wrong turn identity',
-        changes: { files: [] },
-      },
-    }),
-    /turnId/,
-  );
-  assert.throws(
-    () => completions.insertCompletionFirst({
-      threadId: 'row-thread',
-      turnId: 'row-turn',
-      workspace: '/workspace/identity',
-      status: 'failed',
-      terminalResult: new TerminalResult({
-        threadId: 'row-thread',
-        status: 'completed',
-        finalAssistantMessage: 'safe',
-        changes: { files: [] },
-      }),
-    }),
-    /status/,
-  );
+  assert.equal(store.getCurrentSession({ host, workspace }), null);
+
+  // 集合 0 + current null → 原子建立。
+  const established = store.sessionGateTransition({ host, workspace, sessionId: 'session-a', now: T0 });
+  assert.equal(established.decision, 'allow');
+  assert.equal(established.reason, 'session_established');
+  assert.equal(store.getCurrentSession({ host, workspace }), 'session-a');
+
+  // 集合 0 + current 已是本 session → 重确认放行。
+  const reconfirmed = store.sessionGateTransition({
+    host,
+    workspace,
+    sessionId: 'session-a',
+    now: plusSeconds(T0, 1),
+  });
+  assert.equal(reconfirmed.decision, 'allow');
+  assert.equal(reconfirmed.reason, 'session_reconfirmed');
+
+  // session-a 有 active execution → 放行；他人 → veto。
+  store.createExecution(executionInput({ workspace, threadId: 'thread-g1', turnId: 'turn-g1' }));
+  const authorized = store.sessionGateTransition({
+    host,
+    workspace,
+    sessionId: 'session-a',
+    now: plusSeconds(T0, 2),
+  });
+  assert.equal(authorized.decision, 'allow');
+  assert.equal(authorized.reason, 'session_authorized');
+
+  const vetoed = store.sessionGateTransition({
+    host,
+    workspace,
+    sessionId: 'session-b',
+    now: plusSeconds(T0, 3),
+  });
+  assert.equal(vetoed.decision, 'veto');
+  assert.equal(vetoed.reason, 'other_session_active');
+  assert.equal(vetoed.conflict, undefined);
+  assert.equal(store.getCurrentSession({ host, workspace }), 'session-a');
+
+  // a terminal 后懒切换：session-b 过 gate 成功接管。
+  insertProvenancedCompletion(store, { workspace, threadId: 'thread-g1', turnId: 'turn-g1' });
+  const handoff = store.sessionGateTransition({
+    host,
+    workspace,
+    sessionId: 'session-b',
+    now: plusSeconds(T0, 4),
+  });
+  assert.equal(handoff.decision, 'allow');
+  assert.equal(handoff.reason, 'session_handoff');
+  assert.equal(store.getCurrentSession({ host, workspace }), 'session-b');
+
+  // 并发原子切换（同进程顺序模拟，事务语义验证）：空 HostScope 上两个 session 竞争，
+  // 先过 gate 并立即产生 active execution 的 session 独占本轮 establishment，
+  // 后到者被 veto——一个 HostScope 内不会同时出现两个活跃 session。
+  const raceWorkspace = '/workspace/gate-race';
+  const firstArrival = store.sessionGateTransition({
+    host,
+    workspace: raceWorkspace,
+    sessionId: 'session-a',
+    now: T0,
+  });
+  assert.equal(firstArrival.decision, 'allow');
+  store.createExecution(executionInput({
+    workspace: raceWorkspace,
+    threadId: 'thread-race-gate',
+    turnId: 'turn-race-gate',
+  }));
+  const secondArrival = store.sessionGateTransition({
+    host,
+    workspace: raceWorkspace,
+    sessionId: 'session-b',
+    now: T0,
+  });
+  assert.equal(secondArrival.decision, 'veto');
+  assert.equal(secondArrival.reason, 'other_session_active');
+  assert.equal(store.getCurrentSession({ host, workspace: raceWorkspace }), 'session-a');
+
+  // Host Namespace 隔离：同 workspace 下 zcode 的 current_session 独立。
+  assert.equal(store.getCurrentSession({ host: 'zcode', workspace }), null);
+  const zcodeGate = store.sessionGateTransition({
+    host: 'zcode',
+    workspace,
+    sessionId: 'session-z',
+    now: T0,
+  });
+  assert.equal(zcodeGate.decision, 'allow');
+  assert.equal(zcodeGate.reason, 'session_established');
+  assert.equal(store.getCurrentSession({ host: 'kimi-code', workspace }), 'session-b');
+});
+
+test('multiple active sessions veto with conflict and recovery derives from active executions', async (t) => {
+  const { store } = await openStore(t);
+  const host = 'kimi-code';
+  const workspace = '/workspace/conflict';
+
+  store.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-m1',
+    turnId: 'turn-m1',
+    sessionId: 'session-a',
+  }));
+  store.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-m2',
+    turnId: 'turn-m2',
+    sessionId: 'session-b',
+  }));
+
+  const activeSet = store.activeSessionSet({ host, workspace });
+  assert.deepEqual([...activeSet].sort(), ['session-a', 'session-b']);
+
+  // 多 active session：即便包含本 session 也 fail closed。
+  const selfGate = store.sessionGateTransition({ host, workspace, sessionId: 'session-a', now: T0 });
+  assert.equal(selfGate.decision, 'veto');
+  assert.equal(selfGate.conflict, true);
+  const otherGate = store.sessionGateTransition({ host, workspace, sessionId: 'session-c', now: T0 });
+  assert.equal(otherGate.decision, 'veto');
+  assert.equal(otherGate.conflict, true);
+
+  const conflictFix = store.fixCurrentSessionFromExecutions({ host, workspace, now: T0 });
+  assert.equal(conflictFix.fixed, false);
+  assert.equal(conflictFix.conflict, true);
+  assert.equal(store.getCurrentSession({ host, workspace }), null);
+
+  // 收敛到唯一 active session：以 active Execution 为权威修复。
+  insertProvenancedCompletion(store, {
+    workspace,
+    threadId: 'thread-m2',
+    turnId: 'turn-m2',
+    sessionId: 'session-b',
+  });
+  const repaired = store.fixCurrentSessionFromExecutions({ host, workspace, now: plusSeconds(T0, 1) });
+  assert.equal(repaired.fixed, true);
+  assert.equal(repaired.reason, 'repaired');
+  assert.equal(repaired.session, 'session-a');
+  assert.equal(store.getCurrentSession({ host, workspace }), 'session-a');
+
+  const authorized = store.sessionGateTransition({ host, workspace, sessionId: 'session-a', now: T0 });
+  assert.equal(authorized.decision, 'allow');
+  const blocked = store.sessionGateTransition({ host, workspace, sessionId: 'session-b', now: T0 });
+  assert.equal(blocked.decision, 'veto');
+  assert.equal(blocked.reason, 'other_session_active');
+
+  // 全部 terminal：0 active → 保留 stale current_session 不动。
+  insertProvenancedCompletion(store, {
+    workspace,
+    threadId: 'thread-m1',
+    turnId: 'turn-m1',
+    sessionId: 'session-a',
+  });
+  const idle = store.fixCurrentSessionFromExecutions({ host, workspace, now: plusSeconds(T0, 2) });
+  assert.equal(idle.fixed, false);
+  assert.equal(idle.reason, 'no_active_execution');
+  assert.equal(idle.currentSession, 'session-a');
+  assert.equal(store.getCurrentSession({ host, workspace }), 'session-a');
+
+  // stale current 不构成占用：下一次合法 gate 懒切换。
+  const takeover = store.sessionGateTransition({ host, workspace, sessionId: 'session-b', now: T0 });
+  assert.equal(takeover.decision, 'allow');
+  assert.equal(takeover.reason, 'session_handoff');
+});
+
+test('presence lifecycle supports attach, heartbeat renewal, expiry, and detach', async (t) => {
+  const { store } = await openStore(t);
+  const host = 'kimi-code';
+  const workspace = '/workspace/presence';
+
+  const attached = store.attachHostPresence({
+    host,
+    workspace,
+    instanceId: 'instance-1',
+    now: T0,
+    leaseMs: 1000,
+  });
+  assert.equal(attached.expiresAt, plusSeconds(T0, 1));
+  assert.equal(store.isHostAlive({ host, workspace, now: plusSeconds(T0, 0.5) }), true);
+
+  // heartbeat 续期：跨过原租约到期点后仍 alive。
+  const heartbeat = store.heartbeatHostPresence({
+    host,
+    workspace,
+    instanceId: 'instance-1',
+    now: plusSeconds(T0, 0.8),
+    leaseMs: 1000,
+  });
+  assert.equal(heartbeat.refreshed, true);
+  assert.equal(heartbeat.expiresAt, plusSeconds(T0, 1.8));
+  assert.equal(store.isHostAlive({ host, workspace, now: plusSeconds(T0, 1.2) }), true);
+
+  // 过期即不 alive，且过期行被 lazy delete。
+  // instance-1 租约到 T0+1.8s；instance-2 在 T0+1.0s 续期到 T0+2.0s。
+  store.attachHostPresence({
+    host,
+    workspace,
+    instanceId: 'instance-2',
+    now: plusSeconds(T0, 1),
+    leaseMs: 1000,
+  });
+  assert.equal(store.isHostAlive({ host, workspace, now: plusSeconds(T0, 1.9) }), true);
+  const remainingAfterLazyDelete = store.db.prepare(
+    'SELECT instance_id FROM host_presence WHERE host = ? AND workspace = ? ORDER BY instance_id',
+  ).all(host, workspace).map((row) => row.instance_id);
+  assert.deepEqual(remainingAfterLazyDelete, ['instance-2']);
+  assert.equal(store.isHostAlive({ host, workspace, now: plusSeconds(T0, 2.001) }), false);
+  const remaining = store.db.prepare(
+    'SELECT COUNT(*) AS count FROM host_presence WHERE host = ? AND workspace = ?',
+  ).get(host, workspace);
+  assert.equal(remaining.count, 0);
+
+  // detach 后不 alive；detach 之后的 heartbeat 不复活 presence。
+  store.attachHostPresence({
+    host,
+    workspace,
+    instanceId: 'instance-3',
+    now: T0,
+    leaseMs: 60_000,
+  });
+  const detached = store.detachHostPresence({ host, workspace, instanceId: 'instance-3' });
+  assert.equal(detached.detached, true);
+  assert.equal(store.isHostAlive({ host, workspace, now: plusSeconds(T0, 0.1) }), false);
+  const staleHeartbeat = store.heartbeatHostPresence({
+    host,
+    workspace,
+    instanceId: 'instance-3',
+    now: plusSeconds(T0, 0.2),
+    leaseMs: 60_000,
+  });
+  assert.equal(staleHeartbeat.refreshed, false);
+  assert.equal(store.isHostAlive({ host, workspace, now: plusSeconds(T0, 0.3) }), false);
+});
+
+test('thread holds support acquire, self re-entry, alive rejection, stale takeover, and execution repair', async (t) => {
+  const { store } = await openStore(t);
+  const workspace = '/workspace/holds';
+
+  const noHold = { host: 'never' };
+  const aliveHosts = new Set();
+  const isHostAlive = async ({ host }) => aliveHosts.has(host);
+  const seenAliveQueries = [];
+  const recordingIsHostAlive = async (input) => {
+    seenAliveQueries.push(input);
+    return isHostAlive(input);
+  };
+
+  // 情况 C：无 Hold → acquire。
+  const acquired = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-1',
+    workspace,
+    holderHost: 'kimi-code',
+    holdId: 'hold-1',
+    now: T0,
+    isHostAlive,
+  });
+  assert.equal(acquired.status, 'acquired');
+  assert.equal(acquired.mode, 'acquire');
+  assert.equal(acquired.holdId, 'hold-1');
+  assert.equal(store.getThreadHold('thread-1').holderHost, 'kimi-code');
+  assert.equal(store.getThreadHold('thread-1').holdId, 'hold-1');
+
+  // 情况 D：Hold 已属于自己 → 直接继续，不重新生成。
+  const held = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-1',
+    workspace,
+    holderHost: 'kimi-code',
+    holdId: 'hold-ignored',
+    now: plusSeconds(T0, 1),
+    isHostAlive,
+  });
+  assert.equal(held.status, 'held');
+  assert.equal(held.holdId, 'hold-1');
+  assert.equal(store.getThreadHold('thread-1').holdId, 'hold-1');
+
+  // 情况 E：他人 Hold 且 presence alive → 拒绝。
+  aliveHosts.add('kimi-code');
+  const rejected = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-1',
+    workspace,
+    holderHost: 'zcode',
+    holdId: 'hold-2',
+    now: plusSeconds(T0, 2),
+    isHostAlive,
+  });
+  assert.equal(rejected.status, 'rejected');
+  assert.equal(rejected.reason, 'existing_holder');
+  assert.equal(rejected.holderHost, 'kimi-code');
+  aliveHosts.delete('kimi-code');
+
+  // 情况 F：他人 Hold 但 stale → 原子 lazy takeover。
+  const takeover = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-1',
+    workspace,
+    holderHost: 'zcode',
+    holdId: 'hold-2',
+    now: plusSeconds(T0, 3),
+    isHostAlive: recordingIsHostAlive,
+  });
+  assert.equal(takeover.status, 'acquired');
+  assert.equal(takeover.mode, 'takeover');
+  assert.equal(takeover.previousHolder, 'kimi-code');
+  assert.equal(store.getThreadHold('thread-1').holderHost, 'zcode');
+  assert.equal(seenAliveQueries.at(-1).host, 'kimi-code');
+  assert.equal(seenAliveQueries.at(-1).workspace, workspace);
+
+  // active Execution 是权威：他人 active execution → 拒绝并给出 holderHost。
+  store.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-1',
+    turnId: 'turn-1',
+    host: 'kimi-code',
+    sessionId: 'session-a',
+  }));
+  const executionRejected = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-1',
+    workspace,
+    holderHost: 'zcode',
+    holdId: 'hold-3',
+    now: plusSeconds(T0, 4),
+    isHostAlive,
+  });
+  assert.equal(executionRejected.status, 'rejected');
+  assert.equal(executionRejected.reason, 'active_execution');
+  assert.equal(executionRejected.holderHost, 'kimi-code');
+
+  // active Execution 属于自己：Hold 与 execution.host 不一致 → 当次事务自动修复。
+  const repaired = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-1',
+    workspace,
+    holderHost: 'kimi-code',
+    holdId: 'hold-3',
+    now: plusSeconds(T0, 5),
+    isHostAlive,
+  });
+  assert.equal(repaired.status, 'acquired');
+  assert.equal(repaired.mode, 'repair');
+  assert.equal(repaired.holdId, 'hold-3');
+  assert.equal(store.getThreadHold('thread-1').holderHost, 'kimi-code');
+  assert.equal(store.getThreadHold('thread-1').holdId, 'hold-3');
+
+  // 无 Hold 但有属于自己 active execution → 修复路径创建 Hold。
+  const repairedFromNothing = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-2',
+    workspace,
+    holderHost: 'kimi-code',
+    holdId: 'hold-4',
+    now: T0,
+    isHostAlive,
+  }).then(async (first) => {
+    // thread-2 先无 execution：走 acquire。
+    assert.equal(first.status, 'acquired');
+    store.createExecution(executionInput({ workspace, threadId: 'thread-3', turnId: 'turn-3' }));
+    return store.acquireOrTakeoverThreadHold({
+      threadId: 'thread-3',
+      workspace,
+      holderHost: 'kimi-code',
+      holdId: 'hold-5',
+      now: T0,
+      isHostAlive,
+    });
+  });
+  assert.equal(repairedFromNothing.status, 'acquired');
+  assert.equal(repairedFromNothing.mode, 'repair');
+  assert.equal(store.getThreadHold('thread-3').holdId, 'hold-5');
+
+  // 同一 Thread 出现不同 Host 的冲突 active execution → fail closed。
+  store.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-4',
+    turnId: 'turn-4a',
+    host: 'kimi-code',
+  }));
+  store.createExecution(executionInput({
+    workspace,
+    threadId: 'thread-4',
+    turnId: 'turn-4b',
+    host: 'zcode',
+  }));
+  const conflicted = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-4',
+    workspace,
+    holderHost: 'kimi-code',
+    holdId: 'hold-6',
+    now: T0,
+    isHostAlive,
+  });
+  assert.equal(conflicted.status, 'rejected');
+  assert.equal(conflicted.reason, 'conflicting_executions');
+  assert.deepEqual([...conflicted.hosts].sort(), ['kimi-code', 'zcode']);
+  assert.equal(noHold.host, 'never');
+});
+
+test('concurrent stale-hold takeover lets exactly one host win', async (t) => {
+  const { dataDir, store } = await openStore(t);
+  const workspace = '/workspace/hold-race';
+
+  // 旧 Host 持有 Hold 但没有任何 presence（stale）。
+  const legacy = await store.acquireOrTakeoverThreadHold({
+    threadId: 'race-thread',
+    workspace,
+    holderHost: 'legacy-host',
+    holdId: 'hold-legacy',
+    now: T0,
+    isHostAlive: async () => false,
+  });
+  assert.equal(legacy.status, 'acquired');
+
+  const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT);
+  const sqliteModule = new URL('../../src/adapters/sqlite/sqlite-store.mjs', import.meta.url).href;
+  const workerSource = `
+    const { parentPort, workerData } = require('node:worker_threads');
+    (async () => {
+      const { SqliteStore } = await import(workerData.sqliteModule);
+      const store = SqliteStore.open(workerData.dataDir);
+      store.attachHostPresence({
+        host: workerData.host,
+        workspace: workerData.workspace,
+        instanceId: workerData.instanceId,
+        now: workerData.now,
+        leaseMs: 60000,
+      });
+      parentPort.postMessage({ type: 'ready' });
+      Atomics.wait(new Int32Array(workerData.barrier), 0, 0);
+      const result = await store.acquireOrTakeoverThreadHold({
+        threadId: workerData.threadId,
+        workspace: workerData.workspace,
+        holderHost: workerData.host,
+        holdId: workerData.holdId,
+        now: workerData.now,
+        isHostAlive: ({ host, workspace }) => store.isHostAlive({
+          host,
+          workspace,
+          now: workerData.now,
+        }),
+      });
+      parentPort.postMessage({
+        type: 'result',
+        status: result.status,
+        mode: result.mode ?? null,
+        reason: result.reason ?? null,
+        holdId: result.holdId ?? null,
+      });
+      store.close();
+    })().catch((error) => parentPort.postMessage({ type: 'error', message: error.message }));
+  `;
+  const workerSpecs = [
+    { host: 'kimi-code', instanceId: 'instance-b', holdId: 'hold-b' },
+    { host: 'zcode', instanceId: 'instance-c', holdId: 'hold-c' },
+  ];
+  const workers = workerSpecs.map((spec) => new Worker(workerSource, {
+    eval: true,
+    workerData: {
+      barrier,
+      dataDir,
+      host: spec.host,
+      instanceId: spec.instanceId,
+      holdId: spec.holdId,
+      now: T0,
+      sqliteModule,
+      threadId: 'race-thread',
+      workspace,
+    },
+  }));
+  t.after(() => Promise.all(workers.map((worker) => worker.terminate())));
+
+  await Promise.all(workers.map((worker) => nextMessage(worker)));
+  const resultsPromise = workers.map((worker) => nextMessage(worker));
+  Atomics.store(new Int32Array(barrier), 0, 1);
+  Atomics.notify(new Int32Array(barrier), 0, workers.length);
+  const results = await Promise.all(resultsPromise);
+
+  const winners = results.filter((result) => result.status === 'acquired');
+  const losers = results.filter((result) => result.status === 'rejected');
+  assert.equal(winners.length, 1);
+  assert.equal(losers.length, 1);
+  assert.equal(winners[0].mode, 'takeover');
+  assert.equal(losers[0].reason, 'existing_holder');
+
+  const winnerSpec = workerSpecs[results.indexOf(winners[0])];
+  const finalHold = store.getThreadHold('race-thread');
+  assert.equal(finalHold.holderHost, winnerSpec.host);
+  assert.equal(finalHold.holdId, winners[0].holdId);
+  assert.notEqual(finalHold.holdId, 'hold-legacy');
+});
+
+test('releaseThreadHold releases precisely by hold_id and never clobbers a replaced hold', async (t) => {
+  const { store } = await openStore(t);
+  const workspace = '/workspace/release';
+  const isHostAlive = async () => false;
+
+  const acquired = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-1',
+    workspace,
+    holderHost: 'kimi-code',
+    holdId: 'hold-1',
+    now: T0,
+    isHostAlive,
+  });
+  assert.equal(acquired.status, 'acquired');
+
+  // hold_id 不匹配时精确释放不生效。
+  const wrongRelease = store.releaseThreadHold('thread-1', 'hold-wrong');
+  assert.equal(wrongRelease.released, false);
+  assert.equal(store.getThreadHold('thread-1').holdId, 'hold-1');
+
+  // 并发替换场景：active execution 触发 repair，产生新 hold_id。
+  store.createExecution(executionInput({ workspace, threadId: 'thread-1', turnId: 'turn-1' }));
+  const repaired = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-1',
+    workspace,
+    holderHost: 'kimi-code',
+    holdId: 'hold-2',
+    now: plusSeconds(T0, 1),
+    isHostAlive,
+  });
+  assert.equal(repaired.status, 'acquired');
+  assert.equal(repaired.mode, 'repair');
+
+  // startTurn 失败场景：只释放本次取得的 hold_id，不影响已被替换的新 Hold。
+  const staleRelease = store.releaseThreadHold('thread-1', 'hold-1');
+  assert.equal(staleRelease.released, false);
+  assert.equal(store.getThreadHold('thread-1').holdId, 'hold-2');
+
+  const currentRelease = store.releaseThreadHold('thread-1', 'hold-2');
+  assert.equal(currentRelease.released, true);
+  assert.equal(store.getThreadHold('thread-1'), null);
+
+  // 正常 startTurn 失败流程：acquire 后按本次 hold_id 精确释放。
+  const secondAcquire = await store.acquireOrTakeoverThreadHold({
+    threadId: 'thread-2',
+    workspace,
+    holderHost: 'kimi-code',
+    holdId: 'hold-10',
+    now: T0,
+    isHostAlive,
+  });
+  assert.equal(secondAcquire.status, 'acquired');
+  assert.equal(store.releaseThreadHold('thread-2', 'hold-10').released, true);
+  assert.equal(store.getThreadHold('thread-2'), null);
 });

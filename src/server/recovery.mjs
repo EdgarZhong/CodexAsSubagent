@@ -19,7 +19,41 @@ function terminalFromTurn(execution, turn) {
   });
 }
 
-export async function recoverState({ executionStore, historyAdapter, completionRouter, ownerInstanceId = undefined } = {}) {
+// current_session 恢复（规格 §2.10 / 架构设计 §六）：对账完成后按 (host, workspace)
+// 分组校验/修复 current_session。0 active → 保留现状；唯一 → 修复；>1 → conflict
+// 记日志且不写入。不得删除 thread_holds、不得重置 host_presence。
+function fixCurrentSessions({ store, clock, logger }) {
+  if (!store || typeof store.fixCurrentSessionFromExecutions !== 'function') return [];
+  const executions = store.listExecutions();
+  const scopes = [...new Set(executions.map((execution) => `${execution.host}\u0000${execution.workspace}`))]
+    .map((key) => {
+      const [host, workspace] = key.split('\u0000');
+      return { host, workspace };
+    });
+  const conflicts = [];
+  for (const { host, workspace } of scopes) {
+    const result = store.fixCurrentSessionFromExecutions({ host, workspace, now: clock() });
+    if (result?.conflict) {
+      conflicts.push({ host, workspace, ...result });
+      logger?.warn?.('recovery.session_conflict', {
+        host,
+        workspace,
+        activeSessions: result.activeSessions,
+        currentSession: result.currentSession,
+      });
+    }
+  }
+  return conflicts;
+}
+
+export async function recoverState({
+  executionStore,
+  historyAdapter,
+  completionRouter,
+  ownerInstanceId = undefined,
+  logger = null,
+  clock = () => new Date(),
+} = {}) {
   if (!executionStore || !historyAdapter || !completionRouter) throw new TypeError('recoverState requires stores, history adapter and router.');
   const executions = executionStore.listExecutions();
   const recovered = [];
@@ -47,10 +81,20 @@ export async function recoverState({ executionStore, historyAdapter, completionR
       threadId: execution.threadId,
       turnId: execution.turnId,
       status,
+      // synthetic failed 路径同样携带 Execution 的 (host, workspace, session) provenance；
+      // execution 行存在时 insertCompletionFirst 以行为权威并校验一致性。
+      host: execution.host,
+      workspace: execution.workspace,
+      sessionId: execution.sessionId,
       terminalResult,
     });
     if (routed) recovered.push(routed);
   }
+  fixCurrentSessions({
+    store: executionStore.store ?? executionStore,
+    clock,
+    logger,
+  });
   return recovered;
 }
 

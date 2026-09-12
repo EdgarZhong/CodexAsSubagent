@@ -37,10 +37,10 @@ test('localizeKimiManifest strips mcpServers so the host never spawns plugin-cwd
   assert.deepEqual(localized.hooks, manifest.hooks);
 });
 
-test('buildUserMcpServerEntry uses absolute Node + CLI with protocol-coverage timeouts', () => {
+test('buildUserMcpServerEntry uses absolute Node + CLI with --host and protocol-coverage timeouts', () => {
   const entry = buildUserMcpServerEntry({ cliPath: '/repo/src/cli/main.mjs', execPath: '/node/bin/node' });
   assert.equal(entry.command, '/node/bin/node');
-  assert.deepEqual(entry.args, ['/repo/src/cli/main.mjs', 'mcp']);
+  assert.deepEqual(entry.args, ['/repo/src/cli/main.mjs', 'mcp', '--host=kimi-code']);
   assert.equal(entry.startupTimeoutMs, 60000);
   // CAS codex_wait 上限 500s，toolTimeoutMs 必须覆盖协议上限。
   assert.equal(entry.toolTimeoutMs, 520000);
@@ -79,13 +79,18 @@ test('installKimiCodePlugin copies, registers user-level MCP, localizes, enables
   const manifest = await json(join(first.installPath, 'kimi.plugin.json'));
   assert.equal(manifest.mcpServers, undefined, 'managed manifest must not carry mcpServers');
   assert.match(manifest.hooks[0].command, /src\/cli\/main\.mjs/);
-  assert.match(manifest.hooks.find((hook) => hook.event === 'SessionStart').command, /kimi-web --attach/);
+  // V2：hooks 恰为 3 个回流事件，且无 legacy kimi-web/attach/detach 残留。
+  assert.deepEqual(
+    manifest.hooks.map((hook) => hook.event).sort(),
+    ['PreToolUse', 'Stop', 'UserPromptSubmit'],
+  );
+  assert.doesNotMatch(JSON.stringify(manifest), /kimi-web|attach|detach/);
   assert.doesNotMatch(JSON.stringify(manifest), /K3/);
 
   const userMcp = await json(paths.userMcpJson);
   assert.deepEqual(userMcp.mcpServers.playwright, { command: '/bin/pw' });
   assert.equal(userMcp.mcpServers[USER_MCP_SERVER_NAME].command, process.execPath);
-  assert.deepEqual(userMcp.mcpServers[USER_MCP_SERVER_NAME].args, [CLI_ENTRY, 'mcp']);
+  assert.deepEqual(userMcp.mcpServers[USER_MCP_SERVER_NAME].args, [CLI_ENTRY, 'mcp', '--host=kimi-code']);
   assert.equal(userMcp.mcpServers[USER_MCP_SERVER_NAME].toolTimeoutMs, 520000);
   assert.ok(existsSync(`${paths.userMcpJson}.bak-cas`));
 

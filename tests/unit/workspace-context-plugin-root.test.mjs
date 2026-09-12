@@ -65,3 +65,19 @@ test('resolveWorkspaceContext fails closed before workspace resolution', async (
       && /plugin root/i.test(error.message),
   );
 });
+
+test('resolveWorkspaceContext forwards the host into the V2 forwarding context', async (t) => {
+  const { workspace } = await setup(t);
+  const context = await resolveWorkspaceContext({
+    cwd: workspace,
+    host: 'kimi-code',
+    workspaceGuard: { resolve: async (value) => `/canonical${value}` },
+  });
+  assert.deepEqual(context, { host: 'kimi-code', workspace: `/canonical${workspace}` });
+  // 不传 host 时保持 {workspace} 形态（进程内/测试路径兼容）。
+  const legacy = await resolveWorkspaceContext({
+    cwd: workspace,
+    workspaceGuard: { resolve: async (value) => value },
+  });
+  assert.deepEqual(legacy, { workspace });
+});

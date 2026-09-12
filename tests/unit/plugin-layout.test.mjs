@@ -46,12 +46,15 @@ test('Kimi plugin uses the official manifest shape and Kimi-only hooks', async (
   // 插件 manifest 不携带 mcpServers：宿主会以插件托管目录为 cwd 拉起插件 MCP，
   // workspace 永远错配；MCP 必须注册在用户级 mcp.json（见 install-kimi-code-plugin）。
   assert.equal('mcpServers' in manifest, false, '插件 manifest 禁止携带 mcpServers');
+  // V2：移除 kimi-web sidecar 的 SessionStart/TurnStarted/SessionEnd 注册，
+  // hooks 恰为 PreToolUse/Stop/UserPromptSubmit 三个回流事件，命令保持裸形态。
   const events = manifest.hooks.map((hook) => hook.event).sort();
-  assert.deepEqual(events, ['PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'TurnStarted', 'UserPromptSubmit']);
+  assert.deepEqual(events, ['PreToolUse', 'Stop', 'UserPromptSubmit']);
   for (const hook of manifest.hooks) {
-    assert.equal(typeof hook.command, 'string');
+    assert.equal(hook.command, 'codex-as-subagent hook --host=kimi-code');
     assert.equal(typeof hook.timeout, 'number');
     assert.ok(!hook.command.includes('/Users/'));
     assert.ok(!hook.command.includes('/src/cli/'));
   }
+  assert.doesNotMatch(JSON.stringify(manifest), /kimi-web|attach|detach/);
 });

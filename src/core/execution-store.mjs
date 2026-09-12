@@ -15,16 +15,17 @@ export class ExecutionStore {
     return this.store.createExecution(input);
   }
 
-  reserveDirect(input, reservationId, now) {
-    return this.store.reserveDirect(input, reservationId, now);
+  reserveDirect(input = {}) {
+    return this.store.reserveDirect(input);
   }
 
-  releaseReservation(input, reservationId) {
-    return this.store.releaseReservation(input, reservationId);
+  releaseReservation(input = {}) {
+    return this.store.releaseReservation(input);
   }
 
-  getExecution(threadOrOptions, turnId) {
-    return this.store.getExecution(threadOrOptions, turnId);
+  // Trusted supervisor event path 专用（规格 §2.8），不得用于 Host request 投影。
+  getExecutionByPhysicalThreadId(threadId, turnId) {
+    return this.store.getExecutionByPhysicalThreadId(threadId, turnId);
   }
 
   listExecutions(options = {}) {

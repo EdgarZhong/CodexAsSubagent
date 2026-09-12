@@ -25,18 +25,18 @@ test('MCP initialize and tools/list expose a protocol-compatible ten-tool façad
   const { bootstrap } = createBootstrap(async () => {
     throw new Error('tools/list must not reach Runtime Server');
   });
-  const initialized = await bootstrap.handleMcpRequest({ jsonrpc: '2.0', id: 1, method: 'initialize' }, { workspace: '/workspace' });
+  const initialized = await bootstrap.handleMcpRequest({ jsonrpc: '2.0', id: 1, method: 'initialize' }, { host: 'zcode', workspace: '/workspace' });
   assert.equal(initialized.jsonrpc, '2.0');
   assert.equal(initialized.result.capabilities.tools !== undefined, true);
   assert.equal(initialized.result.serverInfo.name, 'codex-as-subagent');
 
-  const listed = await bootstrap.handleMcpRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { workspace: '/workspace' });
+  const listed = await bootstrap.handleMcpRequest({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { host: 'zcode', workspace: '/workspace' });
   assert.equal(listed.result.tools.length, 10);
   assert.deepEqual(listed.result.tools.map((tool) => tool.name), [
     'codex_spawn', 'codex_send', 'codex_steer', 'codex_status', 'codex_wait',
     'codex_wait_many', 'codex_interrupt', 'codex_list_threads', 'codex_read_thread', 'codex_models',
   ]);
-  const unknown = await bootstrap.handleMcpRequest({ jsonrpc: '2.0', id: 3, method: 'unknown/method' }, { workspace: '/workspace' });
+  const unknown = await bootstrap.handleMcpRequest({ jsonrpc: '2.0', id: 3, method: 'unknown/method' }, { host: 'zcode', workspace: '/workspace' });
   assert.deepEqual(unknown.error, { code: -32601, message: 'Method not found: unknown/method' });
 });
 
@@ -63,7 +63,7 @@ test('MCP tools/call maps all ten tools, validates arguments, projects responses
     };
   });
   const { bootstrap } = harness;
-  const context = { workspace: '/workspace/current' };
+  const context = { host: 'zcode', workspace: '/workspace/current' };
   const requests = [
     ['codex_spawn', { prompt: 'start' }, 'runtime.spawn'],
     ['codex_send', { threadId: 'thread-1', prompt: 'continue' }, 'runtime.send'],
@@ -92,6 +92,9 @@ test('MCP tools/call maps all ten tools, validates arguments, projects responses
 
   const ackCalls = calls.filter((entry) => entry.request.method === 'delivery.ack');
   assert.equal(ackCalls.length, 2);
+  for (const entry of ackCalls) {
+    assert.equal(entry.request.params.host, 'zcode', 'delivery.ack must carry the forwarding host');
+  }
   assert.equal(parseOutput(harness.output).jsonrpc, '2.0');
 
   const beforeInvalid = calls.length;
@@ -110,7 +113,7 @@ test('MCP tool errors are returned as isError content and not leaked as runtime 
   }));
   const response = await bootstrap.handleMcpRequest({
     jsonrpc: '2.0', id: 7, method: 'tools/call', params: { name: 'codex_status', arguments: { threadId: 'thread-1' } },
-  }, { workspace: '/workspace/current' });
+  }, { host: 'zcode', workspace: '/workspace/current' });
   assert.equal(response.result.isError, true);
   assert.deepEqual(JSON.parse(response.result.content[0].text), {
     code: 'thread_workspace_mismatch',

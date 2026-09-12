@@ -48,14 +48,17 @@ export class RequestRouter {
 
   async dispatch(method, params, context) {
     if (method === 'delivery.ack') {
-      return { acknowledged: Boolean(this.runtime.ackDeliveryId(params.deliveryId)) };
+      return { acknowledged: Boolean(this.runtime.ackDeliveryId(params.deliveryId, context?.host)) };
     }
     if (method === 'delivery.nack') {
-      return { released: Boolean(this.runtime.releaseDeliveryId(params.deliveryId)) };
+      return { released: Boolean(this.runtime.releaseDeliveryId(params.deliveryId, context?.host)) };
     }
     const operation = METHODS[method];
     if (!operation) throw new DomainError('method_not_found', `Unknown Runtime method: ${method}`);
-    const ctx = { workspace: context?.workspace };
+    // SessionContext 在 dispatch 边界统一解析（规格 §2.5/§五）：bootstrap 只提供
+    // {host, workspace}，经 store current_session 解析 sessionId；所有 runtime.*
+    // 工具统一 session-sensitive，缺失 → session_not_established。
+    const ctx = await this.runtime.sessionContext(context);
     switch (operation) {
       case 'spawn': return await this.runtime.spawn(ctx, params);
       case 'send': return await this.runtime.send(ctx, params);
@@ -66,7 +69,7 @@ export class RequestRouter {
       case 'interrupt': return await this.runtime.interrupt(ctx, params.threadId);
       case 'listThreads': return await this.runtime.listThreads(ctx);
       case 'readThread': return await this.runtime.readThread(ctx, params.threadId);
-      case 'models': return await this.runtime.models();
+      case 'models': return await this.runtime.models(ctx);
       default: throw new DomainError('method_not_found', `Unknown Runtime method: ${method}`);
     }
   }
@@ -93,6 +96,9 @@ export class RequestRouter {
         error: {
           code: errorCode(error),
           message: error?.message ?? 'Runtime request failed.',
+          // 规格 §3.10：错误投影必须保留 error.data，否则 thread_held 的
+          // data.holderHost 会在公开结果中丢失。
+          ...(error?.data !== undefined ? { data: error.data } : {}),
         },
       };
     }

@@ -38,10 +38,12 @@ export async function assertNotInsidePluginRoot(
   }
 }
 
-export async function resolveWorkspaceContext({ cwd = process.cwd(), workspaceGuard = new WorkspaceGuard(), env, realpathImpl } = {}) {
+// V2 转发 context：{host, workspace}。host 由 mcp 命令层静态提供（可选传入，
+// 向后兼容进程内/测试路径），workspace 经 WorkspaceGuard canonicalize。
+export async function resolveWorkspaceContext({ cwd = process.cwd(), host, workspaceGuard = new WorkspaceGuard(), env, realpathImpl } = {}) {
   await assertNotInsidePluginRoot(cwd, { env, realpathImpl });
   const workspace = await workspaceGuard.resolve(cwd);
-  return Object.freeze({ workspace });
+  return Object.freeze(host === undefined ? { workspace } : { host, workspace });
 }
 
 export async function contextFromCanonicalCwd(options = {}) {

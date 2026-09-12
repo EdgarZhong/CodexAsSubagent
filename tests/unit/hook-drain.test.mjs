@@ -22,11 +22,11 @@ test('drainPending claims before rendering and ACKs only after output succeeds',
   const store = {
     requeueExpiredLeases() { events.push('requeue'); return 0; },
     claimPendingHook(input) {
-      events.push(['claim', input.workspace]);
+      events.push(['claim', input.workspace, input.host, input.sessionId]);
       return [row()];
     },
     ackDelivery(input) {
-      events.push(['ack', input.deliveryId]);
+      events.push(['ack', input.deliveryId, input.host]);
       return { acknowledged: true };
     },
   };
@@ -37,11 +37,12 @@ test('drainPending claims before rendering and ACKs only after output succeeds',
     },
   };
   const result = await drainPending({
-    workspace: '/alias/workspace',
+    // DeliveryContext：workspace 必须已是 canonical 形态（canonicalize 由 CLI 层完成）。
+    workspace: '/canonical/workspace',
     host: 'plain',
+    sessionId: 'session-1',
     store,
     deliveryId: 'hook-delivery-1',
-    workspaceGuard: { resolve: async (value) => { events.push(['resolve', value]); return '/canonical/workspace'; } },
     renderer(completions) {
       events.push(['render', completions[0].completionId]);
       return 'rendered completion';
@@ -50,13 +51,28 @@ test('drainPending claims before rendering and ACKs only after output succeeds',
   });
   assert.equal(result.acknowledged, true);
   assert.deepEqual(events, [
-    ['resolve', '/alias/workspace'],
     'requeue',
-    ['claim', '/canonical/workspace'],
+    ['claim', '/canonical/workspace', 'plain', 'session-1'],
     ['render', 'completion-1'],
     ['write', 'rendered completion\n'],
-    ['ack', 'hook-delivery-1'],
+    ['ack', 'hook-delivery-1', 'plain'],
   ]);
+});
+
+test('drainPending rejects workspace-only drains (host and session are mandatory)', async () => {
+  const store = { claimPendingHook() { return []; }, ackDelivery() { return { acknowledged: true }; } };
+  await assert.rejects(
+    drainPending({ workspace: '/workspace', store }),
+    /requires a host/,
+  );
+  await assert.rejects(
+    drainPending({ workspace: '/workspace', host: 'zcode', store }),
+    /requires a sessionId/,
+  );
+  await assert.rejects(
+    drainPending({ host: 'zcode', sessionId: 's1', store }),
+    /canonical workspace/,
+  );
 });
 
 test('a render crash leaves the claimed lease for expiry-based recovery', async () => {
@@ -76,7 +92,7 @@ test('a render crash leaves the claimed lease for expiry-based recovery', async 
     },
   };
   await assert.rejects(
-    drainPending({ workspace: '/workspace', store, workspaceGuard: { resolve: async () => '/workspace' }, renderer() { throw new Error('render crashed'); } }),
+    drainPending({ workspace: '/workspace', host: 'plain', sessionId: 's1', store, renderer() { throw new Error('render crashed'); } }),
     /render crashed/,
   );
   assert.equal(state, 'claimed_hook');
@@ -90,6 +106,7 @@ test('renderer truncates UUID completion ids to the first segment but keeps cust
   assert.match(truncated, /\(6bbf0b7e\)/);
   assert.doesNotMatch(truncated, /6bbf0b7e-baf1/);
   const custom = renderCompletions([row('completion-1')]);
+  assert.match(truncated, /subagent finished/);
   assert.match(custom, /\(completion-1\)/);
 });
 
@@ -131,7 +148,7 @@ test('drainPending can write through a backpressure-aware stream', async () => {
     claimPendingHook() { return [row('stream-completion')]; },
     ackDelivery() { return { acknowledged: true }; },
   };
-  const result = await drainPending({ workspace: '/workspace', store, workspaceGuard: { resolve: async () => '/workspace' }, output });
+  const result = await drainPending({ workspace: '/workspace', host: 'plain', sessionId: 's1', store, output });
   assert.equal(result.acknowledged, true);
   assert.match(chunks.join(''), /stream-completion/);
 });
@@ -146,4 +163,20 @@ test('Kimi blockable hooks explain that the original tool was not executed', () 
   const userPrompt = renderCompletions([completion], 'kimi-code', { event: 'UserPromptSubmit' });
   assert.doesNotMatch(userPrompt, /NOT been executed/i);
   assert.match(userPrompt, /<codex-completion>/);
+});
+
+test('drainPending falls back to plain rendering for hosts without an envelope', async () => {
+  const store = {
+    claimPendingHook() { return [row('unknown-envelope')]; },
+    ackDelivery() { return { acknowledged: true }; },
+  };
+  let written = '';
+  await drainPending({
+    workspace: '/workspace',
+    host: 'unknown-host-example', // 无 envelope 的假想 host：原文输出而非崩溃
+    sessionId: 's1',
+    store,
+    output: { write: (text) => { written += text; return true; } },
+  });
+  assert.match(written, /unknown-envelope/);
 });

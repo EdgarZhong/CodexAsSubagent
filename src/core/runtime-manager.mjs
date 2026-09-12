@@ -5,7 +5,10 @@ import {
   DomainError,
   ERROR_CODES,
   HistoryUnavailableError,
+  HostRequiredError,
+  SessionNotEstablishedError,
   SupervisorUnavailableError,
+  ThreadHeldError,
   ThreadWorkspaceMismatchError,
   WorkspaceUnavailableError,
   errorCode,
@@ -131,11 +134,28 @@ export class RuntimeManager {
       throw new TypeError('waitTimeoutMs must be a non-negative number.');
     }
 
+    // Hold/Presence/current_session 谓词在 V2 Store 上（T1）。门面（ExecutionStore/
+    // CompletionStore）尚未透传这些方法，这里经门面的 .store 取底层 SqliteStore；
+    // 直接传入原始 store 时（store 属性不存在）回退为对象本身。
+    const store = executionStore?.store ?? executionStore;
+    for (const method of [
+      'getCurrentSession',
+      'acquireOrTakeoverThreadHold',
+      'releaseThreadHold',
+      'getThreadHold',
+      'isHostAlive',
+    ]) {
+      if (typeof store?.[method] !== 'function') {
+        throw new TypeError(`RuntimeManager requires a store with ${method}.`);
+      }
+    }
+
     this.adapter = adapter;
     this.workspaceGuard = workspaceGuard;
     this.modelService = modelService;
     this.executionStore = executionStore;
     this.completionStore = completionStore;
+    this.store = store;
     this.completionRouter = completionRouter;
     this.historyAdapter = historyAdapter ?? createHistoryAdapter(adapter);
     this.waitTimeoutMs = waitTimeoutMs;
@@ -196,6 +216,87 @@ export class RuntimeManager {
       throw new WorkspaceUnavailableError();
     }
     return await this.workspaceGuard.resolve(ctx.workspace);
+  }
+
+  // SessionContext（架构设计 §三）：{host, workspace, sessionId}。
+  // ctx.host 缺失 → host_required（fail closed，规格 §2.2：Host 不得推断）；
+  // 无 current_session → session_not_established（架构设计 §四：self-recovering
+  // admission failure，恢复路径为重新经 PreToolUse Session Gate 建立后重试）。
+  // ctx 已带 sessionId 时直接信任（RequestRouter dispatch 边界已解析）。
+  async #session(ctx) {
+    const host = typeof ctx?.host === 'string' ? ctx.host : '';
+    if (host.length === 0) throw new HostRequiredError();
+    const workspace = await this.#workspace(ctx);
+    const sessionId = typeof ctx?.sessionId === 'string' && ctx.sessionId.length > 0
+      ? ctx.sessionId
+      : this.store.getCurrentSession({ host, workspace });
+    if (typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new SessionNotEstablishedError();
+    }
+    return { host, workspace, sessionId };
+  }
+
+  // RequestRouter 在 dispatch 边界解析 SessionContext（bootstrap 只提供 {host, workspace}）。
+  async sessionContext(context) {
+    return await this.#session(context);
+  }
+
+  #isHostAlive(host, workspace) {
+    return this.store.isHostAlive({ host, workspace, now: isoNow(this.clock) });
+  }
+
+  // 规格 §1.6/§1.7：spawn/send 的 Hold 取得入口。status: 'acquired'（acquire/
+  // takeover/repair，本次新取得）/ 'held'（自有有效 Hold）/ 'rejected'。
+  // store 方法为 async（alive 判定可能跨事务），必须 await。
+  async #acquireHold(threadId, workspace, host) {
+    return await this.store.acquireOrTakeoverThreadHold({
+      threadId,
+      workspace,
+      holderHost: host,
+      holdId: randomUUID(),
+      now: isoNow(this.clock),
+      isHostAlive: ({ host: holder, workspace: holdWorkspace }) => {
+        return this.#isHostAlive(holder, holdWorkspace);
+      },
+    });
+  }
+
+  // §1.7 E / active_execution：可确定唯一 holderHost → ThreadHeldError；
+  // conflicting_executions / contention：无法确定唯一 holder，同码 fail closed。
+  #holdRejectionError(result) {
+    if (result?.reason === 'existing_holder' || result?.reason === 'active_execution') {
+      return new ThreadHeldError(result.holderHost);
+    }
+    return new DomainError(
+      ERROR_CODES.THREAD_HELD,
+      result?.reason === 'conflicting_executions'
+        ? 'Thread has conflicting active executions from multiple hosts.'
+        : 'Thread hold could not be acquired due to contention.',
+    );
+  }
+
+  // 本次调用新取得的 Hold（status 'acquired'）在 startTurn 失败时按 hold_id 精确
+  // 释放（§1.8）；调用前已自有有效 Hold（'held'）则失败不释放。
+  #releaseNewHoldOnError(threadId, newHoldId) {
+    if (typeof newHoldId !== 'string' || newHoldId.length === 0) return;
+    try {
+      this.store.releaseThreadHold(threadId, newHoldId);
+    } catch {
+      // 释放失败不得掩盖原始 startTurn 错误。
+    }
+  }
+
+  // §1.10 status/read_thread：读取不取得 Hold、不发生 takeover。他 Host active
+  // Execution，或他 Host Hold 且 holder presence alive → thread_held；stale Hold
+  // 且 idle → 放行。
+  async #assertReadableByCaller(target, session) {
+    const physical = this.executionStore.getExecutionByPhysicalThreadId(target.threadId);
+    if (physical && physical.host !== session.host) throw new ThreadHeldError(physical.host);
+    const hold = this.store.getThreadHold(target.threadId);
+    if (hold && hold.holderHost !== session.host) {
+      const alive = await this.#isHostAlive(hold.holderHost, hold.workspace);
+      if (alive) throw new ThreadHeldError(hold.holderHost);
+    }
   }
 
   async #thread(ctx, threadId) {
@@ -291,8 +392,13 @@ export class RuntimeManager {
     return result;
   }
 
-  #completionFor(threadId, workspace, deliveryId = undefined) {
-    const rows = this.completionStore.listCompletions({ workspace });
+  #completionFor(threadId, session, deliveryId = undefined) {
+    // Direct Wait 只能 claim 当前 SessionContext 归属的 completion（架构设计 §八）。
+    const rows = this.completionStore.listCompletions({
+      host: session.host,
+      workspace: session.workspace,
+      sessionId: session.sessionId,
+    });
     return rows.find((entry) => entry.threadId === threadId
       && (deliveryId === undefined
         ? entry.deliveryState === 'claimed_direct' || entry.deliveryState === 'pending'
@@ -310,7 +416,8 @@ export class RuntimeManager {
     const threadId = typeof event.threadId === 'string' && event.threadId.length > 0
       ? event.threadId : null;
     if (!threadId) return;
-    const execution = this.executionStore.getExecution(threadId);
+    // Trusted supervisor event path（规格 §2.8）：按物理 Thread ID 关联 Execution。
+    const execution = this.executionStore.getExecutionByPhysicalThreadId(threadId);
     const state = this.#state(threadId, execution);
     state.lastActivityAt = typeof event.receivedAt === 'string' ? event.receivedAt : isoNow(this.clock);
     const type = terminalType(event);
@@ -352,7 +459,8 @@ export class RuntimeManager {
   }
 
   async spawn(ctx, input = {}) {
-    const workspace = await this.#workspace(ctx);
+    const session = await this.#session(ctx);
+    const workspace = session.workspace;
     const prompt = typeof input.prompt === 'string' ? input.prompt : '';
     const resolved = await this.modelService.resolveSpawn(input.model, input.effort);
     let started;
@@ -367,6 +475,10 @@ export class RuntimeManager {
     if (thread?.cwd || thread?.workingDirectory || thread?.workspace) {
       await this.workspaceGuard.assertThreadWorkspace(thread, workspace);
     }
+    // 规格 §1.6：准备启动第一 Turn 时当前 Host 成为 holder（新 thread 正常 acquire）。
+    const hold = await this.#acquireHold(threadId, workspace, session.host);
+    if (hold.status === 'rejected') throw this.#holdRejectionError(hold);
+    const newHoldId = hold.status === 'acquired' ? hold.holdId : null;
     let turn;
     try {
       turn = await this.adapter.startTurn({
@@ -377,17 +489,21 @@ export class RuntimeManager {
         effort: resolved.effort,
       });
     } catch (error) {
+      this.#releaseNewHoldOnError(threadId, newHoldId);
       throw asDomainError(error);
     }
     const turnId = turn?.turnId ?? turn?.turn?.id;
     if (typeof turnId !== 'string' || turnId.length === 0) {
+      this.#releaseNewHoldOnError(threadId, newHoldId);
       throw new SupervisorUnavailableError('Supervisor returned no turn id.');
     }
     const startedAt = isoNow(this.clock);
     this.executionStore.createExecution({
       threadId,
       turnId,
+      host: session.host,
       workspace,
+      sessionId: session.sessionId,
       ownerInstanceId: this.ownerInstanceId,
       model: resolved.model,
       effort: resolved.effort,
@@ -411,10 +527,18 @@ export class RuntimeManager {
   }
 
   async send(ctx, input = {}) {
+    const session = await this.#session(ctx);
     const target = await this.#thread(ctx, input.threadId);
     return await this.#withLock(target.threadId, async () => {
-      const current = this.executionStore.getExecution(target.threadId);
-      if (current) throw new DomainError(ERROR_CODES.THREAD_BUSY, 'Thread already has an active turn.');
+      // A/B（§1.7）：active Execution 查找必须 host-scope；先查 caller 域内，
+      // 再用物理 Thread 诊断读取区分 thread_busy 与他 Host 持有。
+      const mine = this.executionStore.listExecutions({ host: session.host })
+        .find((entry) => entry.threadId === target.threadId) ?? null;
+      if (mine) {
+        throw new DomainError(ERROR_CODES.THREAD_BUSY, 'Thread already has an active turn.');
+      }
+      const physical = this.executionStore.getExecutionByPhysicalThreadId(target.threadId);
+      if (physical) throw new ThreadHeldError(physical.host);
       const persisted = this.settings.get(target.threadId) ?? {
         model: target.metadata.model,
         effort: target.metadata.effort,
@@ -428,29 +552,51 @@ export class RuntimeManager {
       } catch (error) {
         throw asDomainError(error, errorCode(error));
       }
-      const resumed = await this.adapter.resumeThread({
-        threadId: target.threadId,
-        workspace: target.workspace,
-        model: resolved.model,
-        effort: resolved.effort,
-      });
+      // C–F（§1.7）：无 active Execution 时经 Hold 裁决；takeover 原子完成。
+      const hold = await this.#acquireHold(target.threadId, target.workspace, session.host);
+      if (hold.status === 'rejected') throw this.#holdRejectionError(hold);
+      const newHoldId = hold.status === 'acquired' ? hold.holdId : null;
+      let resumed;
+      try {
+        resumed = await this.adapter.resumeThread({
+          threadId: target.threadId,
+          workspace: target.workspace,
+          model: resolved.model,
+          effort: resolved.effort,
+        });
+      } catch (error) {
+        this.#releaseNewHoldOnError(target.threadId, newHoldId);
+        throw asDomainError(error);
+      }
       if (resumed === null || resumed === undefined || resumed?.thread === null) {
+        this.#releaseNewHoldOnError(target.threadId, newHoldId);
         throw new DomainError(ERROR_CODES.THREAD_NOT_FOUND, `Thread ${target.threadId} was not found.`);
       }
-      const turn = await this.adapter.startTurn({
-        threadId: target.threadId,
-        prompt: typeof input.prompt === 'string' ? input.prompt : '',
-        workspace: target.workspace,
-        model: resolved.model,
-        effort: resolved.effort,
-      });
+      let turn;
+      try {
+        turn = await this.adapter.startTurn({
+          threadId: target.threadId,
+          prompt: typeof input.prompt === 'string' ? input.prompt : '',
+          workspace: target.workspace,
+          model: resolved.model,
+          effort: resolved.effort,
+        });
+      } catch (error) {
+        this.#releaseNewHoldOnError(target.threadId, newHoldId);
+        throw asDomainError(error);
+      }
       const turnId = turn?.turnId ?? turn?.turn?.id;
-      if (!turnId) throw new SupervisorUnavailableError('Supervisor returned no turn id.');
+      if (!turnId) {
+        this.#releaseNewHoldOnError(target.threadId, newHoldId);
+        throw new SupervisorUnavailableError('Supervisor returned no turn id.');
+      }
       const startedAt = isoNow(this.clock);
       this.executionStore.createExecution({
         threadId: target.threadId,
         turnId,
+        host: session.host,
         workspace: target.workspace,
+        sessionId: session.sessionId,
         ownerInstanceId: this.ownerInstanceId,
         model: resolved.model,
         effort: resolved.effort,
@@ -475,10 +621,21 @@ export class RuntimeManager {
   }
 
   async steer(ctx, input = {}) {
+    const session = await this.#session(ctx);
     const target = await this.#thread(ctx, input.threadId);
     return await this.#withLock(target.threadId, async () => {
-      const execution = this.executionStore.getExecution(target.threadId);
-      if (!execution) throw new DomainError(ERROR_CODES.NO_ACTIVE_TURN, 'Thread has no active turn.');
+      const execution = this.executionStore.listExecutions({ host: session.host })
+        .find((entry) => entry.threadId === target.threadId) ?? null;
+      if (!execution) {
+        // §1.10：steer 不发生 takeover；物理存在他 Host active Execution → thread_held。
+        const physical = this.executionStore.getExecutionByPhysicalThreadId(target.threadId);
+        if (physical) throw new ThreadHeldError(physical.host);
+        throw new DomainError(ERROR_CODES.NO_ACTIVE_TURN, 'Thread has no active turn.');
+      }
+      // 弱 Host 不变量下应一致；不一致说明不变量已被破坏，fail closed。
+      if (execution.sessionId !== session.sessionId) {
+        throw new DomainError(ERROR_CODES.SESSION_CONFLICT, 'Active execution belongs to a different session.');
+      }
       await this.adapter.steerTurn({
         threadId: target.threadId,
         prompt: typeof input.prompt === 'string' ? input.prompt : '',
@@ -491,10 +648,20 @@ export class RuntimeManager {
   }
 
   async interrupt(ctx, threadId) {
+    const session = await this.#session(ctx);
     const target = await this.#thread(ctx, threadId);
     return await this.#withLock(target.threadId, async () => {
-      const execution = this.executionStore.getExecution(target.threadId);
-      if (!execution) throw new DomainError(ERROR_CODES.NO_ACTIVE_TURN, 'Thread has no active turn.');
+      const execution = this.executionStore.listExecutions({ host: session.host })
+        .find((entry) => entry.threadId === target.threadId) ?? null;
+      if (!execution) {
+        // §1.10：interrupt 不发生 takeover；物理存在他 Host active Execution → thread_held。
+        const physical = this.executionStore.getExecutionByPhysicalThreadId(target.threadId);
+        if (physical) throw new ThreadHeldError(physical.host);
+        throw new DomainError(ERROR_CODES.NO_ACTIVE_TURN, 'Thread has no active turn.');
+      }
+      if (execution.sessionId !== session.sessionId) {
+        throw new DomainError(ERROR_CODES.SESSION_CONFLICT, 'Active execution belongs to a different session.');
+      }
       await this.adapter.interruptTurn({ threadId: target.threadId, turnId: execution.turnId });
       return {
         threadId: target.threadId,
@@ -505,11 +672,17 @@ export class RuntimeManager {
   }
 
   async status(ctx, threadId) {
+    const session = await this.#session(ctx);
     const target = await this.#thread(ctx, threadId);
-    const execution = this.executionStore.getExecution(target.threadId);
+    await this.#assertReadableByCaller(target, session);
+    const execution = this.executionStore.listExecutions({ host: session.host })
+      .find((entry) => entry.threadId === target.threadId) ?? null;
     const completion = !execution
-      ? this.completionStore.listCompletions({ workspace: target.workspace })
-        .find((entry) => entry.threadId === target.threadId)
+      ? this.completionStore.listCompletions({
+        host: session.host,
+        workspace: target.workspace,
+        sessionId: session.sessionId,
+      }).find((entry) => entry.threadId === target.threadId)
       : null;
     if (completion) {
       const result = completionResult(completion);
@@ -518,10 +691,12 @@ export class RuntimeManager {
     return this.#publicStatus(target.threadId, execution, target.metadata);
   }
 
-  async #reserve(threadId, workspace, deliveryId) {
+  async #reserve(threadId, session, deliveryId) {
     const reservation = this.executionStore.reserveDirect({
+      host: session.host,
+      workspace: session.workspace,
+      sessionId: session.sessionId,
       threadId,
-      workspace,
       reservationId: deliveryId,
       now: isoNow(this.clock),
     });
@@ -529,15 +704,21 @@ export class RuntimeManager {
       if (reservation?.reason === 'already_reserved') {
         throw new DomainError(ERROR_CODES.THREAD_BUSY, 'Thread is already being waited on.');
       }
+      // store 诊断：物理 thread 上存在他 Host 的 active execution。
+      if (reservation?.reason === 'host_mismatch') {
+        throw new ThreadHeldError(reservation.holderHost);
+      }
+      // session_mismatch / not_found：对当前 Session 而言既无 active turn，
+      // 也没有归属它的 pending completion（架构设计 §八 Direct Wait）。
       throw new DomainError(ERROR_CODES.NO_ACTIVE_TURN, 'Thread has no active turn or pending completion.');
     }
     return reservation;
   }
 
-  async #waitForReservations(reservations, workspace, deliveryId, { timeoutMs = this.waitTimeoutMs } = {}) {
+  async #waitForReservations(reservations, session, deliveryId, { timeoutMs = this.waitTimeoutMs } = {}) {
     const threadIds = reservations.map((entry) => entry.threadId);
-    const done = () => threadIds.every((threadId) => this.#completionFor(threadId, workspace, deliveryId));
-    const collect = () => threadIds.map((threadId) => this.#completionFor(threadId, workspace, deliveryId));
+    const done = () => threadIds.every((threadId) => this.#completionFor(threadId, session, deliveryId));
+    const collect = () => threadIds.map((threadId) => this.#completionFor(threadId, session, deliveryId));
     const initial = collect();
     if (initial.every(Boolean)) return { completions: initial, timedOut: false };
 
@@ -547,7 +728,7 @@ export class RuntimeManager {
         timer: null,
         check: () => {
           for (const threadId of [...waiting]) {
-            if (this.#completionFor(threadId, workspace, deliveryId)) waiting.delete(threadId);
+            if (this.#completionFor(threadId, session, deliveryId)) waiting.delete(threadId);
           }
           if (waiting.size === 0) {
             cleanup();
@@ -579,17 +760,23 @@ export class RuntimeManager {
   }
 
   async wait(ctx, threadId) {
+    const session = await this.#session(ctx);
     const target = await this.#thread(ctx, threadId);
     const deliveryId = randomUUID();
-    const reservation = await this.#reserve(target.threadId, target.workspace, deliveryId);
-    const waited = await this.#waitForReservations([reservation], target.workspace, deliveryId);
+    const reservation = await this.#reserve(target.threadId, session, deliveryId);
+    const waited = await this.#waitForReservations([reservation], session, deliveryId);
     const completion = waited.completions[0];
     if (completion) {
       const result = completionResult(completion);
       if (result) return this.#rememberDelivery(result, deliveryId);
     }
-    this.executionStore.releaseReservation({ threadId: target.threadId, reservationId: deliveryId });
-    const execution = this.executionStore.getExecution(target.threadId);
+    this.executionStore.releaseReservation({
+      host: session.host,
+      threadId: target.threadId,
+      reservationId: deliveryId,
+    });
+    const execution = this.executionStore.listExecutions({ host: session.host })
+      .find((entry) => entry.threadId === target.threadId) ?? null;
     return {
       ...this.#publicStatus(target.threadId, execution, target.metadata),
       timedOut: true,
@@ -597,10 +784,13 @@ export class RuntimeManager {
   }
 
   async waitMany(ctx, threads) {
-    const workspace = await this.#workspace(ctx);
+    const session = await this.#session(ctx);
     let ids;
     if (threads === 'all') {
-      ids = [...new Set(this.executionStore.listExecutions({ workspace }).map((entry) => entry.threadId))];
+      ids = [...new Set(this.executionStore.listExecutions({
+        host: session.host,
+        workspace: session.workspace,
+      }).map((entry) => entry.threadId))];
     } else if (Array.isArray(threads)) {
       ids = [...new Set(threads.map(requiredThreadId))];
     } else {
@@ -612,12 +802,12 @@ export class RuntimeManager {
     const deliveryId = randomUUID();
     const reservations = [];
     try {
-      for (const target of targets) reservations.push(await this.#reserve(target.threadId, workspace, deliveryId));
+      for (const target of targets) reservations.push(await this.#reserve(target.threadId, session, deliveryId));
     } catch (error) {
-      this.executionStore.releaseReservation({ reservationId: deliveryId });
+      this.executionStore.releaseReservation({ host: session.host, reservationId: deliveryId });
       throw error;
     }
-    const waited = await this.#waitForReservations(reservations, workspace, deliveryId);
+    const waited = await this.#waitForReservations(reservations, session, deliveryId);
     const completed = [];
     const pending = [];
     for (let index = 0; index < targets.length; index += 1) {
@@ -631,10 +821,12 @@ export class RuntimeManager {
         }
       }
       this.executionStore.releaseReservation({
+        host: session.host,
         threadId: targets[index].threadId,
         reservationId: deliveryId,
       });
-      const execution = this.executionStore.getExecution(targets[index].threadId);
+      const execution = this.executionStore.listExecutions({ host: session.host })
+        .find((entry) => entry.threadId === targets[index].threadId) ?? null;
       pending.push(this.#publicStatus(targets[index].threadId, execution, targets[index].metadata));
     }
     const batch = {
@@ -646,11 +838,10 @@ export class RuntimeManager {
     return batch;
   }
 
-  async ackDelivery(value) {
+  async ackDelivery(value, host) {
     const deliveryId = this.deliveryIds.get(value);
     if (typeof deliveryId !== 'string') return false;
-    const acknowledged = this.completionStore.ackDelivery({ deliveryId, now: isoNow(this.clock) });
-    return Boolean(acknowledged?.acknowledged);
+    return this.ackDeliveryId(deliveryId, host);
   }
 
   // Runtime Server uses these bridges to keep delivery ids out of the public API.
@@ -658,20 +849,23 @@ export class RuntimeManager {
     return this.deliveryIds.get(value) ?? null;
   }
 
-  ackDeliveryId(deliveryId) {
+  ackDeliveryId(deliveryId, host) {
     if (typeof deliveryId !== 'string' || deliveryId.length === 0) return false;
-    const acknowledged = this.completionStore.ackDelivery({ deliveryId, now: isoNow(this.clock) });
+    if (typeof host !== 'string' || host.length === 0) throw new HostRequiredError();
+    const acknowledged = this.completionStore.ackDelivery({ host, deliveryId, now: isoNow(this.clock) });
     return Boolean(acknowledged?.acknowledged);
   }
 
-  releaseDeliveryId(deliveryId) {
+  releaseDeliveryId(deliveryId, host) {
     if (typeof deliveryId !== 'string' || deliveryId.length === 0) return false;
-    const released = this.executionStore.releaseReservation({ reservationId: deliveryId });
+    if (typeof host !== 'string' || host.length === 0) throw new HostRequiredError();
+    const released = this.executionStore.releaseReservation({ host, reservationId: deliveryId });
     return Boolean(released?.released);
   }
 
   async listThreads(ctx) {
-    const workspace = await this.#workspace(ctx);
+    const session = await this.#session(ctx);
+    const workspace = session.workspace;
     let result;
     try {
       result = await this.adapter.listThreads({ workspace });
@@ -679,6 +873,13 @@ export class RuntimeManager {
       throw asDomainError(error);
     }
     const rawThreads = Array.isArray(result) ? result : result?.threads ?? [];
+    // 内部可见性计算需要跨 Host 的 thread 占用事实；只产出可见性裁决，
+    // 不向他 Host 投影任何业务数据。foreign = 他 Host active Execution。
+    const foreignExecutionThreads = new Set(
+      this.executionStore.listExecutions({ workspace })
+        .filter((entry) => entry.host !== session.host)
+        .map((entry) => entry.threadId),
+    );
     const visible = [];
     for (const thread of rawThreads) {
       const projected = publicThread(thread);
@@ -688,6 +889,14 @@ export class RuntimeManager {
       } catch {
         continue;
       }
+      // §1.10：被其他 Host 有效持有的 thread 不可见；caller 持有、free、
+      // stale-held idle 可见。列举本身不取得 Hold。
+      if (foreignExecutionThreads.has(projected.threadId)) continue;
+      const hold = this.store.getThreadHold(projected.threadId);
+      if (hold && hold.holderHost !== session.host) {
+        const alive = await this.#isHostAlive(hold.holderHost, hold.workspace);
+        if (alive) continue;
+      }
       visible.push(projected);
     }
     visible.sort((left, right) => String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? '')));
@@ -696,7 +905,9 @@ export class RuntimeManager {
   }
 
   async readThread(ctx, threadId) {
+    const session = await this.#session(ctx);
     const target = await this.#thread(ctx, threadId);
+    await this.#assertReadableByCaller(target, session);
     let history;
     try {
       history = await this.historyAdapter.readRecentTurns(target.threadId);
@@ -724,7 +935,9 @@ export class RuntimeManager {
     };
   }
 
-  async models() {
+  // models 同样 session-sensitive（所有 runtime.* 统一走 SessionContext 门禁）。
+  async models(ctx) {
+    await this.#session(ctx);
     const defaultPair = await this.modelService.resolveSpawn();
     let rawModels;
     try {

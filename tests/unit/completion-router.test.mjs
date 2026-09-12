@@ -11,12 +11,23 @@ import { ExecutionStore } from '../../src/core/execution-store.mjs';
 import { TerminalResult } from '../../src/core/terminal-result.mjs';
 import { normalizeEvent } from '../../src/adapters/supervisor/protocol-normalizer.mjs';
 
+const ROUTER_HOST = 'kimi-code';
+const ROUTER_SESSION = 'session-router';
+
 async function setup(t) {
   const dataDir = await mkdtemp(join(tmpdir(), 'codex-as-subagent-router-'));
   const store = SqliteStore.open(dataDir);
   const executions = new ExecutionStore(store);
   const completions = new CompletionStore(store);
   const router = new CompletionRouter({ executions, completions });
+  // V2 executions 需要 (host, workspace, session_id) provenance；统一注入默认值，
+  // 个别用例可显式覆盖。
+  const createExecution = executions.createExecution.bind(executions);
+  executions.createExecution = (input = {}) => createExecution({
+    host: ROUTER_HOST,
+    sessionId: ROUTER_SESSION,
+    ...input,
+  });
   t.after(() => {
     store.close();
     return rm(dataDir, { recursive: true, force: true });
@@ -72,9 +83,9 @@ test('CompletionRouter rejects conflicting evidence before any durable mutation'
       threadId: 'other-thread', status: 'completed', changes: { files: [] },
     } }],
   );
-  const getExecution = router.executions.getExecution.bind(router.executions);
+  const getExecution = router.executions.getExecutionByPhysicalThreadId.bind(router.executions);
   let executionExtras = {};
-  router.executions.getExecution = (...args) => {
+  router.executions.getExecutionByPhysicalThreadId = (...args) => {
     const execution = getExecution(...args);
     return execution ? { ...execution, ...executionExtras } : null;
   };
@@ -110,7 +121,7 @@ test('CompletionRouter validates TerminalResult instance evidence before toJSON 
     executions.createExecution({ threadId, turnId, workspace: '/workspace/instance', ownerInstanceId: 'router-instance' });
     const terminalResult = Object.assign(new TerminalResult({ threadId, status: 'completed' }), extras);
     if (router.onTerminal({ type: 'turn.completed', threadId, turnId, terminalResult }) !== null
-      || executions.getExecution(threadId) === null) failures.push(index);
+      || executions.getExecutionByPhysicalThreadId(threadId) === null) failures.push(index);
   }
   assert.deepEqual(failures, []);
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
@@ -118,8 +129,8 @@ test('CompletionRouter validates TerminalResult instance evidence before toJSON 
 
 test('CompletionRouter requires retained turn identity and accepts consistent terminal evidence', async (t) => {
   const { executions, store, router } = await setup(t);
-  const getExecution = router.executions.getExecution.bind(router.executions);
-  router.executions.getExecution = (...args) => {
+  const getExecution = router.executions.getExecutionByPhysicalThreadId.bind(router.executions);
+  router.executions.getExecutionByPhysicalThreadId = (...args) => {
     const execution = getExecution(...args);
     return execution ? { ...execution, status: { type: 'running', status: 'running' },
       currentTurn: { id: execution.turnId, thread: { id: execution.threadId }, status: 'running' } } : null;
@@ -153,8 +164,12 @@ test('CompletionRouter gates orphan canonical and recovery results on type and v
     const threadId = `thread-orphan-${provenance}`;
     const turnId = `turn-orphan-${provenance}`;
     const terminalResult = new TerminalResult({ threadId, status: 'completed' });
+    // 无 execution 行的 trusted/recovery 合成路径必须显式携带 provenance。
     const event = { provenance, verifiedTerminal: true, threadId, turnId,
-      workspace: '/workspace/orphan', terminalResult,
+      host: ROUTER_HOST,
+      workspace: '/workspace/orphan',
+      sessionId: ROUTER_SESSION,
+      terminalResult,
       type: provenance === 'canonical' ? 'turn.completed' : 'recovery.terminal' };
     for (const extras of [
       { verifiedTerminal: false }, { type: 'error' }, { type: 'item.completed' },
@@ -162,8 +177,78 @@ test('CompletionRouter gates orphan canonical and recovery results on type and v
       { turnRecord: { id: 'other-turn' } },
     ]) assert.equal(router.onTerminal({ ...event, ...extras }), null);
     assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions WHERE thread_id = ?').get(threadId).count, 0);
-    assert.equal(router.onTerminal(event).payload.status, 'completed');
+    const completion = router.onTerminal(event);
+    assert.equal(completion.payload.status, 'completed');
+    assert.equal(completion.host, ROUTER_HOST);
+    assert.equal(completion.sessionId, ROUTER_SESSION);
   }
+});
+
+test('CompletionRouter fails closed when an orphan trusted result lacks provenance', async (t) => {
+  const { store, router } = await setup(t);
+  const terminalResult = new TerminalResult({ threadId: 'thread-orphan-naked', status: 'completed' });
+  assert.throws(
+    () => router.onTerminal({
+      type: 'recovery.terminal',
+      provenance: 'recovery',
+      verifiedTerminal: true,
+      threadId: 'thread-orphan-naked',
+      turnId: 'turn-orphan-naked',
+      terminalResult,
+    }),
+    /host/i,
+  );
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
+});
+
+test('CompletionRouter inherits host/session provenance from the execution row', async (t) => {
+  const { store, executions, completions, router } = await setup(t);
+  executions.createExecution({
+    threadId: 'thread-provenance',
+    turnId: 'turn-provenance',
+    host: 'zcode',
+    workspace: '/workspace/provenance',
+    sessionId: 'session-inherited',
+    ownerInstanceId: 'router-instance',
+  });
+  const result = router.onTerminal({
+    type: 'turn.completed',
+    status: 'completed',
+    threadId: 'thread-provenance',
+    turnId: 'turn-provenance',
+    finalAssistantMessage: 'done',
+    turn: { id: 'turn-provenance', status: 'completed' },
+  });
+  assert.equal(result.deliveryState, 'pending');
+  const row = completions.getCompletion(result.completionId);
+  assert.equal(row.host, 'zcode');
+  assert.equal(row.workspace, '/workspace/provenance');
+  assert.equal(row.sessionId, 'session-inherited');
+
+  // 事件携带冲突 provenance 时 fail closed，不落任何 completion。
+  executions.createExecution({
+    threadId: 'thread-provenance-conflict',
+    turnId: 'turn-provenance-conflict',
+    host: 'zcode',
+    workspace: '/workspace/provenance',
+    sessionId: 'session-inherited',
+    ownerInstanceId: 'router-instance',
+  });
+  assert.throws(
+    () => router.onTerminal({
+      type: 'turn.completed',
+      status: 'completed',
+      threadId: 'thread-provenance-conflict',
+      turnId: 'turn-provenance-conflict',
+      host: 'kimi-code',
+      sessionId: 'session-inherited',
+      turn: { id: 'turn-provenance-conflict', status: 'completed' },
+    }),
+    /host does not match/i,
+  );
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions WHERE thread_id = ?')
+    .get('thread-provenance-conflict').count, 0);
+  assert.notEqual(executions.getExecutionByPhysicalThreadId('thread-provenance-conflict'), null);
 });
 
 test('CompletionRouter persists terminal result first and ignores non-terminal events', async (t) => {
@@ -201,7 +286,7 @@ test('CompletionRouter persists terminal result first and ignores non-terminal e
   assert.equal(result.deliveryState, 'pending');
   assert.equal(result.payload.finalAssistantMessage, 'finished');
   assert.equal(result.payload.changes.files[0].path, 'current-turn.mjs');
-  assert.equal(executions.getExecution('thread-router'), null);
+  assert.equal(executions.getExecutionByPhysicalThreadId('thread-router'), null);
   assert.equal(completions.getCompletion(result.completionId).deliveryState, 'pending');
 });
 
@@ -260,7 +345,7 @@ test('CompletionRouter accepts valid failed and interrupted terminal events', as
     });
     assert.equal(result.payload.status, status);
     assert.equal(completions.getCompletion(result.completionId).terminalStatus, status);
-    assert.equal(executions.getExecution(threadId), null);
+    assert.equal(executions.getExecutionByPhysicalThreadId(threadId), null);
   }
 });
 
@@ -282,7 +367,9 @@ test('CompletionRouter accepts an already-built verified recovery TerminalResult
     verifiedTerminal: true,
     threadId: 'thread-canonical',
     turnId: 'turn-canonical',
+    host: ROUTER_HOST,
     workspace: '/workspace/router-canonical',
+    sessionId: ROUTER_SESSION,
     terminalResult,
   });
   assert.equal(result.deliveryState, 'pending');
@@ -319,7 +406,7 @@ test('CompletionRouter only accepts verified terminal types and matching identit
     assert.equal(router.onTerminal(event), null);
   }
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
-  assert.notEqual(executions.getExecution('thread-negative'), null);
+  assert.notEqual(executions.getExecutionByPhysicalThreadId('thread-negative'), null);
 
   assert.equal(router.onTerminal({
     type: 'turn.completed',
@@ -367,7 +454,7 @@ test('CompletionRouter only accepts verified terminal types and matching identit
     turnId: 'stale-turn',
   }), null);
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
-  assert.notEqual(executions.getExecution('thread-negative'), null);
+  assert.notEqual(executions.getExecutionByPhysicalThreadId('thread-negative'), null);
 
   const mismatchedResult = new TerminalResult({
     threadId: 'other-thread',
@@ -507,7 +594,7 @@ test('CompletionRouter rejects nested status and identity conflicts', async (t) 
     assert.equal(router.onTerminal(event), null);
   }
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
-  assert.notEqual(executions.getExecution(threadId), null);
+  assert.notEqual(executions.getExecutionByPhysicalThreadId(threadId), null);
 });
 
 test('CompletionRouter rejects nested supplied-result status and identity conflicts', async (t) => {
@@ -577,7 +664,7 @@ test('CompletionRouter rejects nested supplied-result status and identity confli
   }
 
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
-  assert.ok(cases.every(({ threadId }) => executions.getExecution(threadId) !== null));
+  assert.ok(cases.every(({ threadId }) => executions.getExecutionByPhysicalThreadId(threadId) !== null));
 });
 
 test('CompletionRouter rejects conflicting nested active-execution evidence', async (t) => {
@@ -630,9 +717,9 @@ test('CompletionRouter rejects conflicting nested active-execution evidence', as
     });
   }
 
-  const getExecution = router.executions.getExecution.bind(router.executions);
+  const getExecution = router.executions.getExecutionByPhysicalThreadId.bind(router.executions);
   const evidenceByThread = new Map(cases.map((entry) => [entry.threadId, entry.evidence]));
-  router.executions.getExecution = (threadOrOptions, turnId) => {
+  router.executions.getExecutionByPhysicalThreadId = (threadOrOptions, turnId) => {
     const execution = getExecution(threadOrOptions, turnId);
     return execution
       ? { ...execution, ...evidenceByThread.get(execution.threadId) }
@@ -649,7 +736,7 @@ test('CompletionRouter rejects conflicting nested active-execution evidence', as
   }
 
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM completions').get().count, 0);
-  assert.ok(cases.every(({ threadId }) => executions.getExecution(threadId) !== null));
+  assert.ok(cases.every(({ threadId }) => executions.getExecutionByPhysicalThreadId(threadId) !== null));
 });
 
 test('CompletionRouter preserves truncated normalized change metadata', async (t) => {
@@ -694,6 +781,9 @@ test('CompletionRouter routes a reserved direct terminal result without holding 
     ownerInstanceId: 'router-instance',
   });
   const reservation = executions.reserveDirect({
+    host: ROUTER_HOST,
+    workspace,
+    sessionId: ROUTER_SESSION,
     threadId: 'thread-router-direct',
     reservationId: 'router-direct-delivery',
   });
@@ -711,5 +801,5 @@ test('CompletionRouter routes a reserved direct terminal result without holding 
   });
   assert.equal(result.deliveryState, 'claimed_direct');
   assert.equal(result.deliveryId, 'router-direct-delivery');
-  assert.equal(completions.ackDelivery({ deliveryId: result.deliveryId }).deliveryState, 'delivered');
+  assert.equal(completions.ackDelivery({ host: ROUTER_HOST, deliveryId: result.deliveryId }).deliveryState, 'delivered');
 });

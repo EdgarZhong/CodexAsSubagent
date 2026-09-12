@@ -21,7 +21,7 @@ export async function install(argv = [], { stdout = process.stdout, stderr = pro
         '  动作:',
         ...plan.actions.map((action) => `    - ${action}`),
       ];
-      if (!plan.dryRun) lines.push('  提示: 在 Kimi Code 中执行 /reload 或新开 session 后生效；Web 回流仅使用 K2.7。');
+      if (!plan.dryRun) lines.push('  提示: 在 Kimi Code 中执行 /reload 或新开 session 后生效；Web 回流由 Runtime 事件驱动投递。');
       stdout.write(`${lines.join('\n')}\n`);
       return 0;
     } catch (error) {
