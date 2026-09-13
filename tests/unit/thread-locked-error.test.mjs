@@ -7,6 +7,7 @@ import {
   ERROR_CODES,
   errorCode,
   normalizeSupervisorError,
+  ThreadHeldError,
 } from '../../src/shared/errors.mjs';
 import { StdioBootstrap } from '../../src/mcp/stdio-bootstrap.mjs';
 
@@ -98,4 +99,30 @@ test('thrown lock error is normalized at the tool exit too', async () => {
   const error = toolError(response);
   assert.equal(error.code, 'thread_locked');
   assert.doesNotMatch(error.message, /already has an active writer/);
+});
+
+// 规格 §3.10：模型可见错误投影必须保留 error.data（thread_held 的 holderHost）。
+test('model-facing tool error preserves error.data for thread_held', async () => {
+  const bootstrap = bootstrapWith(async () => ({
+    id: 2,
+    error: {
+      code: 'thread_held',
+      message: 'Thread is currently held by another host.',
+      data: { holderHost: 'zcode' },
+    },
+  }));
+  const response = await bootstrap.handleMcpRequest(toolCall('codex_status', { threadId: 't-4' }), { workspace: process.cwd() });
+  const error = toolError(response);
+  assert.equal(response.result.isError, true);
+  assert.equal(error.code, 'thread_held');
+  assert.equal(error.message, 'Thread is currently held by another host.');
+  assert.deepEqual(error.data, { holderHost: 'zcode' });
+});
+
+test('thrown ThreadHeldError keeps holderHost at the tool exit too', async () => {
+  const bootstrap = bootstrapWith(async () => { throw new ThreadHeldError('kimi-code'); });
+  const response = await bootstrap.handleMcpRequest(toolCall('codex_interrupt', { threadId: 't-5' }), { workspace: process.cwd() });
+  const error = toolError(response);
+  assert.equal(error.code, 'thread_held');
+  assert.deepEqual(error.data, { holderHost: 'kimi-code' });
 });

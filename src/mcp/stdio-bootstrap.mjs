@@ -126,9 +126,11 @@ function toolErrorContent(error) {
   // 唯一允许改写的上游错误：跨客户端线程写锁争用（见 shared/errors.mjs）。
   // 其余错误的 code/message 一律原样透传。
   const normalized = normalizeSupervisorError(error);
+  // 规格 §3.10：模型可见错误投影必须保留 error.data（thread_held 的 holderHost）。
   return toolContent({
     code: errorCode(normalized),
     message: normalized?.message ?? 'Tool call failed.',
+    ...(normalized?.data !== undefined ? { data: normalized.data } : {}),
   });
 }
 
