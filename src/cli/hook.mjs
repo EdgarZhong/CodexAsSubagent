@@ -89,11 +89,18 @@ export async function hook(argv = [], {
     toolCallId: parsed.toolCallId,
   });
 
+  // 宿主对 MCP 工具送完整限定名（mcp__<server>__<tool>）；CAS 集合按注册名匹配，
+  // 归一化取末段，非限定名原样返回。
+  function casToolName(toolName) {
+    if (typeof toolName !== 'string') return toolName;
+    return toolName.includes('__') ? toolName.split('__').pop() : toolName;
+  }
+
   // 门禁触发条件：adapter 声明 gate 事件（kimi-code: PreToolUse）+ 当前工具属于 CAS MCP 工具集。
   const gateApplies = typeof adapter.sessionGateEvent === 'string'
     && hookContext.event === adapter.sessionGateEvent
     && typeof hookContext.toolName === 'string'
-    && CAS_TOOL_NAMES.has(hookContext.toolName);
+    && CAS_TOOL_NAMES.has(casToolName(hookContext.toolName));
   // 回流注入的 block 语义事件（kimi-code: PreToolUse/Stop → stderr + exit 2）。
   const blockDelivery = Boolean(adapter.blockDeliveryEvents?.has(hookContext.event));
   const dataDir = dataDirOverride ?? option(argv, '--data-dir', DEFAULT_DATA_DIR);

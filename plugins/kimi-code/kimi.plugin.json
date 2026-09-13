@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "description": "将本机 Codex subagent runtime 注册到 Kimi Code，并回流异步 completion。",
   "keywords": ["codex", "subagent", "mcp", "hooks"],
-  "author": "EdgarZhong",
+  "author": {
+    "name": "EdgarZhong"
+  },
   "license": "MIT",
   "systemPromptPath": "./SYSTEM.md",
   "interface": {

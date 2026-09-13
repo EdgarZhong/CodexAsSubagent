@@ -126,6 +126,18 @@ test('without pending completions a CAS tool on PreToolUse goes through the sess
   });
 });
 
+test('host-qualified MCP tool names (mcp__<server>__<tool>) are normalized for the gate', async () => {
+  const { store, openStore } = fakeStore({ gate: { decision: 'allow' } });
+  const result = await runHook(['--host=kimi-code', '--data-dir=/tmp/hook-x'], {
+    openStore,
+    payload: basePayload({ tool_name: 'mcp__codex-as-subagent__codex_models' }),
+  });
+  assert.equal(result.code, 0);
+  const gate = store.calls.find(([kind]) => kind === 'gate');
+  assert.ok(gate, 'qualified MCP tool name must still trigger the session gate');
+  assert.equal(gate[1].sessionId, 'session-A');
+});
+
 test('a vetoed session gate blocks the CAS tool with the not-executed envelope', async () => {
   const { store, openStore } = fakeStore({ gate: { decision: 'veto', reason: 'other_session_active' } });
   const result = await runHook(['--host=kimi-code', '--data-dir=/tmp/hook-x'], { openStore });

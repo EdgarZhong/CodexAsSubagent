@@ -74,15 +74,38 @@ async function backupOnce(path) {
   }
 }
 
+// Kimi 宿主 hook 经 Bun 运行时 spawn(shell:true) 执行 hook command 字符串。实证矩阵：
+// 无引号单命令（touch）可触发；无论是否加引号的 node 多参数命令都静默失效且无进程
+// 痕迹（Bun 内置 shell 对该形态的解析与 /bin/sh 不一致）。宿主对 config.toml
+// [[hooks]] 的 `sh /abs/script.sh` 形态长期可靠，故 hook command 一律本地化为
+// `sh <installPath>/hook-wrapper.sh`，由安装器生成 wrapper 承载完整命令行。
 function quoteShell(value) {
   const text = String(value);
+  if (/^[A-Za-z0-9_./:@+=-]+$/.test(text)) return text;
   return `'${text.replaceAll("'", "'\\''")}'`;
 }
 
-function hookCommand(command, { cliPath, execPath }) {
-  const tokens = String(command ?? '').trim().split(/\s+/).filter(Boolean);
-  if (tokens[0] === PLUGIN_NAME) tokens.shift();
-  return [quoteShell(execPath), quoteShell(cliPath), ...tokens].join(' ');
+export const HOOK_WRAPPER_FILENAME = 'hook-wrapper.sh';
+
+export function buildHookWrapper({ cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
+  return [
+    '#!/bin/sh',
+    '# Codex As Subagent — Kimi Code hook wrapper（安装器本地化生成，勿手改）。',
+    `exec ${quoteShell(execPath)} ${quoteShell(cliPath)} hook --host=kimi-code "$@"`,
+    '',
+  ].join('\n');
+}
+
+function hookCommand(installPath) {
+  return `sh ${quoteShell(join(installPath, HOOK_WRAPPER_FILENAME))}`;
+}
+
+export function localizeKimiHooks(manifest, { installPath }) {
+  const hooks = (Array.isArray(manifest?.hooks) ? manifest.hooks : []).map((hook) => ({
+    ...hook,
+    command: hookCommand(installPath),
+  }));
+  return { ...manifest, hooks };
 }
 
 export function buildUserMcpServerEntry({ cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
@@ -105,14 +128,6 @@ export function mergeUserMcpConfig(existing, entry) {
 export function localizeKimiManifest(manifest) {
   const { mcpServers: _stripped, ...rest } = manifest ?? {};
   return rest;
-}
-
-export function localizeKimiHooks(manifest, { cliPath = CLI_ENTRY, execPath = process.execPath } = {}) {
-  const hooks = (Array.isArray(manifest?.hooks) ? manifest.hooks : []).map((hook) => ({
-    ...hook,
-    command: hookCommand(hook.command, { cliPath, execPath }),
-  }));
-  return { ...manifest, hooks };
 }
 
 function upsertPlugin(list, entry) {
@@ -140,7 +155,10 @@ export async function installKimiCodePlugin(options = {}) {
   const record = {
     id: PLUGIN_NAME,
     root: paths.installPath,
-    source: 'plugins/kimi-code',
+    // 宿主 pluginService.listPlugins 输出校验 source 为枚举 local-path|zip-url|github；
+    // 非法值导致整个插件列表加载失败、hooks 被静默丢弃（2026-09-13 实锤根因）。
+    source: 'local-path',
+    originalSource: 'plugins/kimi-code',
     version: manifest.version,
     enabled: true,
     installedAt: installed.plugins.find((entry) => entry?.id === PLUGIN_NAME)?.installedAt ?? now,
@@ -161,7 +179,7 @@ export async function installKimiCodePlugin(options = {}) {
       `register MCP server "${USER_MCP_SERVER_NAME}" in ${paths.userMcpJson}`,
       `register ${PLUGIN_NAME} in ${paths.installedPlugins}`,
       `enable ${PLUGIN_NAME}`,
-      'localize hook commands with absolute Node and CLI paths',
+      `write ${HOOK_WRAPPER_FILENAME} and localize hook commands as "sh <installPath>/${HOOK_WRAPPER_FILENAME}"`,
     ],
   };
   if (dryRun) return plan;
@@ -177,7 +195,8 @@ export async function installKimiCodePlugin(options = {}) {
   // 托管副本必须与源严格一致：先清空再拷贝，避免旧版本残留文件（如已废弃的 launcher）。
   await rm(paths.installPath, { recursive: true, force: true });
   await cp(pluginSource, paths.installPath, { recursive: true, force: true });
-  const localized = localizeKimiHooks(localizeKimiManifest(manifest), { cliPath, execPath });
+  await writeFile(join(paths.installPath, HOOK_WRAPPER_FILENAME), buildHookWrapper({ cliPath, execPath }), { mode: 0o755 });
+  const localized = localizeKimiHooks(localizeKimiManifest(manifest), { installPath: paths.installPath });
   await writeJsonAtomic(join(paths.installPath, 'kimi.plugin.json'), localized);
   await writeJsonAtomic(paths.installedPlugins, installed);
 
