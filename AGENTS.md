@@ -51,8 +51,8 @@
 
 1. **只改仓库源码**：`plugins/<host>/` 下的资源文件，以及对应的 `src/` 实现（如 `src/hook/hosts/<host>.mjs`）。`plugins/<host>/` 中的资源保持**与宿主无关的干净形态**（如裸命令 `codex-as-subagent`），不要写入本机绝对路径。
 2. **用本项目二进制安装到宿主**：`node src/cli/main.mjs install --host=<host>`（或 `npm run install:<host>`）。安装器负责拷贝资源到宿主插件缓存、本地化命令（Hook 走 shell，本地化为绝对路径；Kimi 的 MCP server 注册到用户级 `$KIMI_CODE_HOME/mcp.json`——插件 manifest 携带 MCP 会被宿主以插件目录 cwd 拉起，workspace 永远错配，禁止使用）、探测运行时（如 `CODEX_BIN`）、注册 marketplace 与安装记录、启用插件，并在覆盖前留备份。重复执行幂等。
-3. **重启宿主**（或新开会话）使配置生效。Hook 配置在会话启动时加载，MCP server 每会话新建进程，因此均需重启/新会话后才生效。
-4. **验证**：`<host> plugins list` 确认注册与 hooks 数量；再走一遍真实用户路径（spawn → completion 落盘 → Hook 回流）。
+3. **重启宿主**（或新开会话）使配置生效。Hook 配置在会话启动时加载，MCP server 每会话新建进程，因此均需重启/新会话后才生效。Kimi 宿主也可不重启：`/plugins` 面板选中插件按 **R** reload 即重载插件与 hooks（显示的 `Reload: +0 -0` 是增删计数，非成功标志）。
+4. **验证**：Kimi 用 TUI `/plugins` 面板与 `/plugins info <id>` 详情（CLI 无 plugins 子命令；详情页只显示 Skills/MCP/Diagnostics，不渲染 hooks 数量；若列表/详情报 output validation 错误即为安装记录不合规）。注意两层静默失效：installed.json 的 `source` 必须是宿主枚举值（kimi: local-path|zip-url|github），非法值导致整个插件 hooks 被静默丢弃；hook 侧的 session 身份与 tool 名以宿主 stdin 原样值为准（`session_<uuid>` 前缀、`mcp__<server>__<tool>` 限定名），任何一层格式不一致都会静默失配。最后走一遍真实用户路径（spawn → completion 落盘 → Hook 回流注入）。
 
 变更只涉及 `src/`（不含 `plugins/` 资源）时，通常无需重装：Hook 每次事件现起进程读源码；Runtime Server 懒启动且空闲自退，下次自动加载新代码；MCP server 在新会话重建。
 
