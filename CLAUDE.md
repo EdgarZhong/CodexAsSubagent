@@ -2,7 +2,8 @@
 
 ## 当前阶段
 
-- 目标：V2 升级已全部交付——三份 V2 规格实现、确定性回归与**双宿主（Kimi/ZCode）真实用户级验收全部通过**（2026-09-13）；剩余 Backlog：本地未提交变更的 commit/push 授权、开源一键安装在 Host 子进程 PATH 的发现方案、`status=failed` 路径构造验证。
+- 目标：V2 升级已全部交付——三份 V2 规格实现、确定性回归与**双宿主（Kimi/ZCode）真实用户级验收全部通过**（2026-09-13）；剩余 Backlog：开源一键安装在 Host 子进程 PATH 的发现方案、`status=failed` 路径构造验证。
+- 开源发布（2026-09-16，用户授权）：README 双语重写为面向用户口径（`README.md` 英文主 + `README.zh-CN.md` 中文镜像互链），定位改为「any coding-agent harness 的 Codex subagent runtime」，Roadmap 三级（当前 Kimi/ZCode → Claude Code 新 Mod 范式 + Pi → DSH → Grok Build/Gemini CLI）；新增 `setup.sh`（Node≥24 检查 + 子模块 + npm install + doctor），Quick start 定为 clone → setup.sh → `install --host=<host>`；仓库设为 GitHub 公开，英文简介。release 渠道后续候选：npm 全局安装（vendor submodule 需 prepack 打包）、Host 市场路线后置。
 - 权威规格（冲突时以此为准，均为 2026-09-12 修订后的唯一自洽版本）：
   1. `docs/CodexAsSubagent V2 Session 隔离与 Mailbox 架构设计.md`
   2. `docs/CodexAsSubagent V2 串投修复与 Kimi Code 集成适配说明.md`

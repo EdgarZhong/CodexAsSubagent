@@ -1,167 +1,209 @@
 # Codex As Subagent
 
-Codex As Subagent 将本机已登录的 OpenAI Codex 作为通用 Subagent Runtime，向 ZCode、Kimi Code、Claude Code、Grok Build、Pi 等 Coding Agent 提供受控的 MCP 工具与后台完成结果回流能力。
+**Turn your local OpenAI Codex into a subagent runtime for any coding-agent harness.**
 
-## 项目定位
+[中文 README](README.zh-CN.md)
 
-本项目不重新实现 Codex Agent。Codex 负责模型推理、工具调用、文件修改、thread/turn、认证、配置与会话持久化；本项目负责 Subagent supervision、runtime lifecycle、Host/Workspace/Session 三层隔离、completion routing、MCP façade、Hook 和 Host integration。
+Codex As Subagent (CAS) lets your coding agent spawn real Codex threads as background subagents: delegate a task, keep working in your main session, and get the result delivered back automatically when the subagent finishes. No extra API keys — it runs on the Codex you already logged into.
 
-公共抽象固定为：一个 Codex thread 就是一个 Subagent，threadId 是唯一对外身份，单次执行是内部 turn。turnId、event cursor、reservation、delivery 和上游 raw event 均为内部实现细节。
+Currently adapted harnesses: **Kimi Code** and **ZCode**. The architecture is harness-agnostic — see [Roadmap](#roadmap).
 
-## 架构
+## Quick start
 
-    Coding Agent Host
-            │ MCP stdio
-            ▼
-    MCP Bootstrap ──HTTP over Unix Domain Socket──▶ Runtime Server
-                                                       │
-                                                       ├─ RuntimeManager（Thread Hold / Session Gate）
-                                                       ├─ CompletionRouter（含 Web 事件驱动 delivery）
-                                                       ├─ StateStore (SQLite)
-                                                       ├─ WorkspaceGuard
-                                                       └─ Codex Supervisor Adapter
-                                                            │
-                                                            ▼
-                                                       Codex app-server
+```bash
+git clone --recurse-submodules https://github.com/EdgarZhong/CodexAsSubagent.git
+cd CodexAsSubagent
+./setup.sh                                        # Node >= 24 check, vendor submodule, deps, doctor
 
-    Host Hook ──▶ Host Adapter (src/hosts/<host>) ──▶ CompletionStore (SQLite)
+# then install into your harness:
+node src/cli/main.mjs install --host=kimi-code    # Kimi Code — then /reload or start a new session
+node src/cli/main.mjs install --host=zcode        # ZCode
+```
 
-Bootstrap 只负责 Host 身份（`--host`）、workspace canonicalization、Presence lease、lazy-start Server、转发请求和 direct-delivery ACK；不持有业务状态。Runtime Server 持有 live Codex runtime 和 active execution。Hook 进程经 Host Adapter 解析 native payload（含 session identity）后直读 SQLite claim，不经 Runtime Server。
+Requires Node.js ≥ 24 and a logged-in Codex on this machine — see [Requirements](#requirements). Installer options and the ZCode GUI path: [Install](#install).
 
-### 隔离模型（V2）
+## A typical session
 
-- **Host 是产品类型**（`kimi-code`、`zcode`、…），由 Host integration 静态指定，不从 cwd/session/进程名/工具参数推断；同一产品的多个 CLI 进程 = 同一 Host 的多个 Session。
-- 隔离命名空间：`Execution/Completion` 在创建时固化不可变 provenance `(host, workspace, session_id)`；Thread 只有临时 Host Hold（`thread_holds` + `host_presence` lease，spawn/send 取得，stale 可 lazy takeover）。
-- Weak Host 的 MCP 请求 session-blind：session 身份由 `PreToolUse` Session Gate 写入持久化 `current_sessions(host, workspace)`，MCP 请求按其归属；无 `current_session` 时 fail closed `session_not_established`（下一次合法 PreToolUse 后自恢复）。
-- 所有 completion claim（Hook / waiter）使用完整 `(host, workspace, session_id, delivery_state='pending')` 谓词，workspace-only 盲领被结构性排除；claim 以 `delivery_state + claim_id` 定界，每次重新 claim 生成新 claim 代际。
-- Kimi TUI 与 Web 统一 `host = kimi-code`；当前 V2 的唯一主动 Mailbox delivery transport 是 Hook，Terminal Initiate 按 waiter reservation 选择两个 Initial Transaction 分支（出生即 `claimed_waiter` 或 `pending`）。
+```text
+You:    Spawn a Codex subagent to refactor the auth module while I review the API tests.
+Agent:  → codex_spawn → returns threadId in a second. Both of you keep working.
 
-## 稳定接口与实现入口
+        ... minutes later, in the middle of another conversation turn ...
 
-| 内容 | 入口 |
+Agent:  <codex-completion> threadId=… status=completed
+        Refactored auth module into 3 files, summary: … changed files: …
+
+You:    The error handling looks off — steer it to use Result types instead.
+Agent:  → codex_steer → the running subagent changes course immediately.
+```
+
+Delegation never blocks you, and completions find their own way back — even if they finish mid-turn, after a restart, or while you're in a different conversation.
+
+## What you get
+
+- **Parallel delegation, async by default, zero waiting.** Spawn one subagent or five with `codex_spawn`; each returns instantly and runs in the background while your main session stays responsive.
+- **Results delivered to your session.** Finished work is injected back into the exact session that asked for it — hook-based, automatic, and never lost, even if CAS or the host restarts midway.
+- **Stay in control mid-flight.** Follow up on a finished thread (`codex_send`), redirect a running one (`codex_steer`), or stop it (`codex_interrupt`) — interrupted work is still delivered with everything it produced.
+- **Pull when you prefer.** `codex_wait` / `codex_wait_many` (up to 500s), `codex_status`, `codex_read_thread`, `codex_list_threads` for synchronous collection whenever you want it.
+- **Across harnesses — held threads are protected.** A thread actively held by one harness answers every other harness with a clear `thread_held` (naming the holder) — never silent interference. When the holder harness exits, any harness can transparently take the thread over.
+- **Within one harness — sessions take turns.** While one session has a subagent actively running, another session's CAS calls are vetoed until that turn ends, then ownership hands over automatically. A running turn answers `codex_send` with `thread_busy` and steer/interrupt with `session_conflict`; once idle, any of your sessions can continue the thread.
+- **Many windows, no mix-ups.** Run several sessions and harnesses side by side; every result lands in the session that spawned it, never a neighbor's.
+- **Your Codex, your machine.** Uses the Codex you're already logged into. Nothing leaves your machine; your Codex transcripts stay untouched in `~/.codex/`.
+- **Zero maintenance.** The runtime starts itself on first use and exits when idle. All state is one local SQLite file.
+- **You pick the model.** `codex_models` lists the Codex models and reasoning efforts available on your machine, and you can explicitly set model and effort for each subagent when spawning or messaging it. CAS's out-of-the-box default profile: `gpt-5.6-luna` + `xhigh`.
+
+## Supported harnesses
+
+| Harness | Status | Integration |
+|---|---|---|
+| Kimi Code (TUI & Web) | ✅ Supported | `plugins/kimi-code` — MCP server in user-level `mcp.json`, hooks on `PreToolUse` / `Stop` / `UserPromptSubmit` |
+| ZCode | ✅ Supported | `plugins/zcode` — `.mcp.json` + hooks on `PreToolUse` / `PostToolUse` / `UserPromptSubmit` / `Stop` |
+
+### Bring your own harness
+
+A harness is adaptable when it provides:
+
+1. **stdio MCP servers**, spawned with the session's workspace as CWD;
+2. **Lifecycle hooks** (equivalents of `PreToolUse` / `Stop` / `UserPromptSubmit`) whose payload carries a session identity and CWD.
+
+Integration then means a host adapter in `src/hosts/<host>.mjs` (native payload parsing) plus plugin resources in `plugins/<host>/`. The core runtime contains no per-harness branches.
+
+## Roadmap
+
+- **Now**: Kimi Code, ZCode
+- **Next**: Claude Code (via its new mod/extension paradigm), Pi
+- **Then**: DSH
+- **Later**: Grok Build, Gemini CLI
+
+## Requirements
+
+- **Node.js ≥ 24**.
+- A **logged-in OpenAI Codex** on this machine (standalone Codex CLI or the one embedded in ChatGPT.app — CAS finds it automatically; `CODEX_BIN` overrides).
+- **macOS** is the tested platform. Linux is expected to work but not yet verified; Windows is not supported.
+
+## Install
+
+[Quick start](#quick-start) covers the standard flow (`git clone` → `./setup.sh` → `install --host=<host>`). Details:
+
+```bash
+# Kimi Code
+node src/cli/main.mjs install --host=kimi-code
+# then run /reload in Kimi, or start a new session
+
+# ZCode
+node src/cli/main.mjs install --host=zcode
+# or use ZCode's GUI: Settings → Plugin Management → Discover
+```
+
+Both installers are idempotent, back up overwritten host state (`*.bak-cas`), and support `--dry-run`. ZCode also has a GUI-native path via the marketplace in this repo's root (`marketplace.json`); see [plugins/zcode/README.md](plugins/zcode/README.md) and [plugins/kimi-code/README.md](plugins/kimi-code/README.md) for details.
+
+Sanity-check your setup anytime:
+
+```bash
+node src/cli/main.mjs doctor --json
+```
+
+## The ten tools
+
+Once installed, your harness gains ten MCP tools (e.g. `mcp__codex-as-subagent__codex_spawn`):
+
+| Tool | What it does |
 |---|---|
-| V2 权威规格（三份） | docs/CodexAsSubagent V2 Session 隔离与 Mailbox 架构设计.md、docs/CodexAsSubagent V2 串投修复与 Kimi Code 集成适配说明.md、docs/CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格.md |
-| V1 基线规格 | docs/Codex As Subagent — 详细设计与编码规格.md |
-| 当前阶段与任务看板 | CLAUDE.md |
-| 通用协作与开发规则 | AGENTS.md |
-| 实施计划 | docs/superpowers/plans/ |
-| Host 插件 | plugins/ |
-| Runtime 源码 | src/ |
-| 测试 | tests/ |
+| `codex_spawn` | Start a new subagent thread. Always async — returns a `threadId` immediately. |
+| `codex_send` | Send a follow-up message to an idle thread. |
+| `codex_steer` | Redirect a thread while it is running. |
+| `codex_interrupt` | Stop a running thread; its partial result is still delivered. |
+| `codex_wait` / `codex_wait_many` | Block until one or more threads finish (max 500s). |
+| `codex_status` | Snapshot of a thread's current state. |
+| `codex_read_thread` | Read a thread's history and latest output. |
+| `codex_list_threads` | List threads visible to your session. |
+| `codex_models` | List available models and reasoning efforts. |
 
-## 目录骨架
+The model never chooses where a subagent works: every thread runs in your current project directory, exactly as your session sees it.
 
-    src/
-    ├── adapters/supervisor/  # 上游 codex-supervisor-mcp 的唯一隔离层
-    ├── adapters/sqlite/      # SQLite StateStore（V2 schema：executions/completions/thread_holds/host_presence/current_sessions）
-    ├── core/                 # Runtime、execution、completion、workspace、model、Thread Hold
-    ├── hosts/                # Host Protocol Registry 与各 Host native payload 解析（kimi-code、zcode）
-    ├── server/               # Unix socket Server、请求路由、生命周期、恢复
-    ├── mcp/                  # stdio Bootstrap、工具注册、响应投影
-    ├── hook/                 # completion drain 与 Host 输出 envelope（hosts/）
-    ├── install/              # Host 插件安装器（拷贝资源、本地化命令、注册 marketplace）
-    ├── cli/                  # serve、mcp、hook、drain、install、doctor 命令
-    └── shared/               # 常量、错误、协议工具、argv、Codex runtime 发现、日志
-    plugins/                  # Host 资源源文件（MCP/Hook 注册、manifest），唯一真源
-    vendor/                   # Git Submodule
-    tests/                    # unit、integration、e2e、fixtures
-    docs/                     # 规格、计划、验收记录
+## Configuration
 
-## 运行环境与命令
+- Data directory: `~/.codex-as-subagent/` (SQLite state, socket, logs).
+- Optional `~/.codex-as-subagent/config.toml`: incremental overrides of **Codex** configuration keys, applied on top of your Codex config when the runtime starts (invalid file = runtime refuses to start, never silent). See [config.example.toml](config.example.toml).
+- **Decoupled from your own Codex setup**: these overrides live in CAS's data directory and apply only to subagents spawned through CAS — your personal `~/.codex/config.toml` and your direct Codex usage stay exactly as they are. Give subagents a different default model or effort without touching your own setup.
+- `CODEX_BIN`: pin a specific Codex binary instead of auto-discovery.
 
-- Node.js >=24.0.0，使用 ESM。
-- 持久目录默认为 ~/.codex-as-subagent/，包含 state.sqlite、Unix socket、锁和 server.log。`config.toml`（可选，对 Codex 配置的增量覆写，只含 Codex 键）会在 Server 冷启动时翻译为 `-c key=value` 并插入 `app-server` 参数之前；文件不存在不覆写，格式错误 fail-closed。参考 [config.example.toml](config.example.toml)。
-- Codex 自有认证、profile、transcript 仍位于 ~/.codex/，不复制到本项目数据库。
-- 默认 dedicated Codex profile：gpt-5.6-luna + xhigh。Server 冷启动时自动发现 Codex app-server 运行时（`CODEX_BIN` env 优先），无需手工配置路径。
-- **升级须知（V2 breaking）**：V2 不做数据迁移。升级前停止旧 CAS Runtime/MCP 实例与依赖旧 runtime state 的 Subagent Turn；旧 CAS SQLite 状态（含 delivered history）不保证保留，启动时按 V2 schema 废弃重建。
+## How it works
 
-    npm install
-    npm test
-    npm run lint
-    npm run smoke
-    npm run install:kimi-code:dry
-    node src/cli/main.mjs doctor --json
-    node src/cli/main.mjs --help
+CAS does not reimplement an agent — Codex itself does the reasoning, tool calls, and file edits. CAS adds what subagent use needs on top: supervision, isolation, and delivery guarantees.
 
-运行前需要本机已登录 Codex，并具备可用的 Codex app-server。
+```mermaid
+flowchart TD
+    Host["Coding Agent Harness<br/>(Kimi Code / ZCode / ...)"]
+    Bootstrap["MCP Bootstrap"]
+    Hook["Host Hook"]
 
-## CLI 协议（V2）
+    subgraph Server["Runtime Server"]
+        RM["RuntimeManager"]
+        Router["CompletionRouter"]
+        Guard["WorkspaceGuard"]
+        Store["StateStore"]
+        Adapter["Codex Supervisor Adapter"]
+    end
 
-- `serve [--data-dir] [--socket] [--lock] [--idle-shutdown-ms]`：全局共享 Runtime，不接受 `--host/--workspace/--session`。
-- `mcp --host <HOST> [--data-dir] [--socket] [--lock]`：`--host` 必填；workspace 取 MCP 进程 cwd 经 WorkspaceGuard canonicalize；启动即注册 Presence（heartbeat 20s / lease 60s，直写 SQLite），注册成功后才处理 MCP 调用，退出 best-effort detach。
-- `hook --host <HOST>`：`--host` 必填，无 plain fallback；Host 原始 payload 经 stdin 原样进入，由 `src/hosts/<host>` 解析 session identity/cwd/event/tool 字段；正式集成不得用 `--workspace` 覆盖。
-- `drain --host <HOST> --workspace <PATH> --session <SESSION_ID>`：三项全部必填的低层投递接口，不做 workspace-only drain。
+    AppServer["Codex app-server"]
+    HostAdapter["Host Adapter<br/>(src/hosts/&lt;host&gt;)"]
+    DB[("SQLite state.sqlite — single source of truth")]
 
-## MCP 公共工具
+    Host -- "MCP stdio" --> Bootstrap
+    Bootstrap -- "HTTP over Unix Domain Socket" --> Server
+    Store <--> DB
+    Adapter --> AppServer
+    Hook --> HostAdapter
+    HostAdapter -- "completion claim / ACK,<br/>bypasses Runtime Server" --> DB
+```
 
-固定公开十个工具：codex_spawn、codex_send、codex_steer、codex_status、codex_wait、codex_wait_many、codex_interrupt、codex_list_threads、codex_read_thread、codex_models。
+- One Codex thread **is** one subagent; `threadId` is the only public identity.
+- A thin MCP bootstrap per session forwards to a shared runtime server, which supervises live Codex threads. All durable state lives in a single local SQLite database.
+- Host hooks deliver completions straight from that database into your session — they don't depend on the runtime being up, and a result is only marked delivered after your session has actually received it.
 
-codex_spawn 永远异步；codex_wait 与 codex_wait_many 固定最多等待 500 秒；工具不接受 cwd/workspace/sandbox/approval/event cursor/turnId 参数。当前 Host 的 canonical CWD 是唯一 workspace 边界；session 身份不进入工具参数。
+## Known limitations
 
-线程操作与 Hold 的关系（详见 V2 实施规格 §1.10）：spawn 创建 Hold；send 检查/acquire/lazy takeover（他人有效持有时返回 `thread_held` 与 `data.holderHost`）；steer/interrupt 不 takeover；wait/status/read_thread 不取 Hold；list_threads 不显示其他 active Host 有效持有的 Thread。Codex 自身 writer lock 错误仍规范化为 `thread_locked`，与 CAS 层 `thread_held` 严格分离。
+- **Shared Codex thread lock**: if another Codex client (sharing `~/.codex`) is occupying a thread, CAS write operations on it fail with `thread_locked`; read-only operations are unaffected.
+- **Kimi Code delivery may swallow one tool call**: when a completion is delivered through Kimi's `PreToolUse` hook, the tool call that triggered it is vetoed once (it has not actually run) so the result can be injected first; the model retries the tool afterwards if still needed.
+- **`codex_wait_many` array branch**: some models serialize array arguments into JSON strings; on such models use the `"all"` form instead.
+- **Upgrading from V1**: V2 rebuilds its database from scratch; old runtime state (including delivered history) is not migrated.
 
-## Hook 与 Host 插件
+## Product usage constraints
 
-`codex-as-subagent hook --host=<host>` 经 Host Adapter 解析 native session identity 后，按完整 `(host, workspace, session_id)` 原子 claim pending completion，渲染后 ACK；Hook 缺必要 session 字段时拒绝 claim（不 fallback）。Kimi TUI 的 `PreToolUse` 承担双重职责且顺序固定：先 Mailbox 回流（claim 自己 session 的 pending → veto 工具 → 注入），无 pending 时才对 CAS MCP 工具执行 Session Gate（他人 active Execution → veto；空闲 → 原子接管）。`Stop`/`UserPromptSubmit` 只承担 Mailbox delivery。Hook 不启动、恢复或中断 Codex thread。
+These are by design, not bugs:
 
-`plugins/kimi-code/` 服务 Kimi TUI 与 Web（统一 `--host=kimi-code`）：主动回流经 Host Hook（`PreToolUse`/`Stop`/`UserPromptSubmit`）注入；Hook 静态安装，是否投递由 Mailbox 数据决定，不动态装卸 Hook。CLI 安装命令为 `codex-as-subagent install --host=kimi-code`，支持 `--dry-run --kimi-code-home <path>`；MCP server 由安装器注册到用户级 `$KIMI_CODE_HOME/mcp.json`（宿主以 workspace cwd 拉起用户级 stdio MCP；插件 manifest 携带 MCP 会以插件目录为 cwd，禁止使用）。安装后执行 `/reload` 或新开 Kimi session。
+- **One active CAS session per workspace at a time — for session-blind hosts only.** On hosts whose MCP tool calls cannot carry a session identity (both Kimi Code and ZCode today; session identity is only available through the hook channel), a single session per workspace may actively drive CAS; other sessions are vetoed until it goes idle, then ownership hands over automatically. For future **strong hosts** that pass session identity natively through MCP, this constraint will be lifted and multiple sessions will use CAS concurrently.
+- **One shared runtime server per machine**, started lazily and stopped when idle.
+- **The model never chooses the execution boundary**: subagents always run in your current project directory, and the MCP surface deliberately exposes no cwd, sandbox, or approval parameters.
 
-`plugins/zcode/` 注册 ZCode 插件：`.mcp.json` 提供十个 MCP 工具，`hooks/hooks.json` 在 `UserPromptSubmit`、`PostToolUse`（匹配所有工具）与 `Stop` 触发 `codex-as-subagent hook --host=zcode`。**注意（2026-09-12）**：V2 核心已合入，但 ZCode 插件资源升级与真实 E2E 推后到单独一轮，现有 ZCode 安装在 V2 协议下暂不可用（`mcp` 现要求 `--host`）。
+## Documentation
 
-Host 插件的本机开发闭环见 AGENTS.md「Host 插件开发与安装 SOP」：改 `plugins/<host>/` 源码 → `install --host=<host>` → 重启宿主 → 验证。
+The authoritative design specs and project documentation are currently written in Chinese.
 
-## 已知限制与未完成项
-
-**使用前提与限制**
-
-- **共享 `~/.codex` 的跨客户端线程锁**：Codex app-server 对每个 thread 持有 flock 型写锁。若同一账号下另有 Codex 客户端同时占用某线程，本项目的 `codex_send`/`codex_steer`/`codex_interrupt` 对该线程会失败；只读操作不受影响。该情况返回 `thread_locked`（关闭另一客户端或改用新线程）。这是共享 Codex 存储的固有限制，作为使用前提接受。
-- **仅 `thread_locked` 一个上游错误被规范化**为该文案，其余上游错误保持原样透传；`thread_held`/`session_not_established` 为 CAS 自身错误码。
-- **Kimi Web Server API 属于 experimental**：投递以实例 API 的 session/workspace 校验为准；Server 缺失时 completion 保持 pending，不丢数据。
-- **弱 Host 固有边界**：同一 `(host, workspace)` 在 idle 交接边界并发的 session-blind MCP 调用无法归因（设计明确不支持，见 V2 架构设计 §五）。
-
-**尚未完成（权威清单见 CLAUDE.md 任务看板）**
-
-- `tests/e2e/`、`tests/fixtures/` 空占位，缺自动化 E2E。
-- 开源一键安装在 Host 子进程 PATH 的发现方案未定。
-- 真实 Kimi TUI/Web E2E 与 ZCode 插件升级待用户/下一轮执行。
-- 真实 `status=failed` turn 路径未单独构造验证。
-
-**明确不做**
-
-- 不做多 Server 路由，也不保留 Web transport 错误面（Server 型 Host 单 active Server 为环境假设；同一 `(host, workspace, session_id)` 单活跃 interactive instance 为产品约束）。
-- 不做 V1→V2 数据迁移与旧状态保留（破坏性重建是完整升级契约）。
-- 不做线程锁探测；不新增 Hook 事件；MCP public API 不增加 cwd/workspace/sandbox/approval/event cursor/raw event/generic Codex config 编辑能力。
-
-## 开发测试闭环
-
-1. 先阅读三份 V2 规格、AGENTS.md 和 CLAUDE.md（V1 基线规格用于未被 V2 修改的语义）。
-2. 在 tests/unit 先覆盖状态机、Host/Session 隔离、Thread Hold、协议投影和 changed-files attribution，再补 integration/e2e。
-3. 每次改变 TerminalResult、delivery、lifecycle 或公共 schema，都运行相关测试和完整 npm test。
-4. 复核由主会话承担：规格覆盖、隔离 fail-closed、completion-first、无丢失交付和用户路径。
-5. 完成前按 docs/autonomous-runs/ 中的验收记录逐条执行真实用户级验收。
-
-## 重要文档索引
-
-| 文档 | 内容 |
+| Document | Contents |
 |---|---|
-| README.md | 稳定项目事实、架构、目录、命令和入口 |
-| AGENTS.md | 项目通用规则、流程、边界和验收要求 |
-| CLAUDE.md | 当前阶段进度、任务看板、决策和风险 |
-| docs/CodexAsSubagent V2 Session 隔离与 Mailbox 架构设计.md | V2 权威规格：Session Identity、弱 Host 状态机、Mailbox、Fail-Closed/Recovery Matrix、环境假设 |
-| docs/CodexAsSubagent V2 串投修复与 Kimi Code 集成适配说明.md | V2 权威规格：claim 谓词修复、Kimi TUI 双职责、Web 事件驱动 delivery |
-| docs/CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格.md | V2 权威规格：Thread Hold/Presence、Host Namespace、CLI 协议、验收场景 |
-| docs/Codex As Subagent — 详细设计与编码规格.md | V1 基线规格（已交付；被取代小节已移除） |
-| docs/Codex As Subagent × Kimi Code — 主动回流设计定稿与集成参考知识库.md | Kimi 协议事实参考（Hook payload、Server API、registry；worker 设计部分已废除） |
-| docs/superpowers/plans/ | 各轮实现计划、接口和测试任务 |
-| docs/autonomous-runs/ | 用户级验收快照与结果 |
-| docs/autonomous-runs/20260911-2320-session-routing-and-isolation-findings.md | V1 串投取证（Kimi Web + ZCode 复现；V2 已结构性修复） |
-| docs/autonomous-runs/20260911-1340-ten-tool-e2e-and-interrupt.md | 十工具真实 ZCode 会话 E2E、中断协议修复（V1） |
-| docs/autonomous-runs/20260911-1701-kimi-code-integration.md | Kimi Code TUI/Web 插件、安装器与 completion 回流验收（V1） |
-| docs/research/2026-09-11-codex-runtime-discovery.md | Codex 安装形态、认证共享与 app-server 协议外部调研 |
-| docs/research/2026-09-11-zcode-hook-protocol.md | ZCode Hook/MCP/插件协议逆向取证调研 |
-| plugins/zcode/README.md | ZCode MCP/Hook 插件安装说明 |
-| plugins/kimi-code/README.md | Kimi Code TUI/Web MCP、Hook 与安装说明 |
+| [AGENTS.md](AGENTS.md) | Project-wide rules, workflows, boundaries, acceptance requirements |
+| [CLAUDE.md](CLAUDE.md) | Current stage status, task board, decisions |
+| [docs/CodexAsSubagent V2 Session 隔离与 Mailbox 架构设计.md](docs/CodexAsSubagent%20V2%20Session%20隔离与%20Mailbox%20架构设计.md) | V2 authoritative spec: session identity, mailbox, fail-closed/recovery matrix |
+| [docs/CodexAsSubagent V2 串投修复与 Kimi Code 集成适配说明.md](docs/CodexAsSubagent%20V2%20串投修复与%20Kimi%20Code%20集成适配说明.md) | V2 authoritative spec: claim predicates, Kimi integration |
+| [docs/CodexAsSubagent V2 Host 隔离、Thread Hold 与 CLI-Adapter 实施规格.md](docs/CodexAsSubagent%20V2%20Host%20隔离、Thread%20Hold%20与%20CLI-Adapter%20实施规格.md) | V2 authoritative spec: thread hold/presence, CLI protocol, acceptance scenarios |
+| [docs/Codex As Subagent — 详细设计与编码规格.md](docs/Codex%20As%20Subagent%20—%20详细设计与编码规格.md) | V1 baseline spec (superseded sections removed) |
+| [docs/autonomous-runs/](docs/autonomous-runs/) | User-level acceptance records with real-session evidence |
+| [docs/research/](docs/research/) | External research (Codex runtime discovery, ZCode hook protocol) |
+| [plugins/kimi-code/README.md](plugins/kimi-code/README.md) | Kimi Code plugin & installer details |
+| [plugins/zcode/README.md](plugins/zcode/README.md) | ZCode plugin & installer details |
 
-## 许可证
+## Development
 
-主项目按 MIT License 发布；vendor/codex-supervisor-mcp 保留其上游 MIT License 与版权声明。
+```bash
+npm test          # unit + integration tests (node --test)
+npm run lint      # syntax check over src/**/*.mjs
+npm run smoke     # CLI smoke test
+```
+
+Contributions welcome — please read [AGENTS.md](AGENTS.md) first; the runtime's isolation and delivery invariants are load-bearing.
+
+## License
+
+MIT. `vendor/codex-supervisor-mcp` retains its upstream MIT license and copyright.
